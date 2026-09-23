@@ -1,0 +1,115 @@
+name: Build PonWrt Custom
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '选择编译版本'
+        required: true
+        default: 'lite'
+        type: choice
+        options:
+          - lite
+          - full
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - device: "fiberhome_hg5585f-cu"
+            config: "an7581.config"
+            profile: "fiberhome_hg5585f-cu"
+          - device: "fiberhome_hg5585f-ct"
+            config: "an7581.config"
+            profile: "fiberhome_hg5585f-ct"
+          - device: "znxt_zn515xg-d"
+            config: "an7581.config"
+            profile: "znxt_zn515xg-d"
+          - device: "nokia_xg-040g-md-ubi"
+            config: "an7581.config"
+            profile: "nokia_xg-040g-md-ubi"
+          # - device: "hm2004du"
+          #   config: "an7581.config"
+          #   profile: "hm2004du"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget
+
+      - name: Update Feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Inject Lite Packages
+        if: github.event.inputs.version == 'lite'
+        run: |
+          CONF="configs/${{ matrix.config }}"
+          echo "CONFIG_PACKAGE_luci-app-adblock=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-ddns-go=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> $CONF
+          echo "CONFIG_PACKAGE_ttyd=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-autoreboot=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-advanced-reboot=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-wifischedule=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-commands=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
+
+      - name: Inject Full Packages
+        if: github.event.inputs.version == 'full'
+        run: |
+          CONF="configs/${{ matrix.config }}"
+          echo "CONFIG_PACKAGE_luci-app-adblock=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-ddns-go=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> $CONF
+          echo "CONFIG_PACKAGE_ttyd=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-autoreboot=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-advanced-reboot=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-wifischedule=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-commands=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-samba4=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-diskman=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-aria2=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-usb-printer=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-minidlna=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-hd-idle=y" >> $CONF
+
+      - name: Load Config & Customize Defaults
+        run: |
+          cp configs/${{ matrix.config }} .config
+          make defconfig
+
+          WIRELESS="package/base-files/files/etc/config/wireless"
+          if [ -f "$WIRELESS" ]; then
+            sed -i "s/option ssid .*/option ssid 'ImmortalWrt'/" $WIRELESS
+            sed -i "s/option country .*/option country 'CN'/" $WIRELESS
+            sed -i "s/option encryption .*/option encryption 'none'/" $WIRELESS
+            sed -i "s/option txpower .*/option txpower '27'/" $WIRELESS
+          fi
+
+          sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
+
+      - name: Download Sources
+        run: make download -j8
+
+      - name: Compile
+        run: make -j$(nproc) || make -j1 V=s
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: PonWrt-${{ matrix.device }}-${{ github.event.inputs.version }}
+          path: bin/targets/airoha/*/
