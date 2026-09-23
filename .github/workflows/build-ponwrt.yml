@@ -1,4 +1,4 @@
-name: Build PonWrt for HG5585F-CT
+name: Build PonWrt for HG5585F
 
 on:
   workflow_dispatch:
@@ -6,7 +6,6 @@ on:
 jobs:
   build:
     runs-on: ubuntu-22.04
-    # 编译失败立即停止，不浪费时间继续
     strategy:
       fail-fast: true
     steps:
@@ -28,36 +27,24 @@ jobs:
       - name: Inject Packages
         run: |
           CONF="configs/an7581.config"
-          
-          # --- 1. 修复主题 & 基础运行环境 ---
           echo "CONFIG_PACKAGE_lua=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-compat=y" >> $CONF
-          
-          # --- 2. 基础功能 & 系统工具 ---
           echo "CONFIG_PACKAGE_luci-app-adblock=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ddns-go=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-autoreboot=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-commands=y" >> $CONF
-          
-          # --- 3. USB 基础支持 ---
           echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> $CONF
-          
-          # --- 4. U 盘文件管理 ---
           echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> $CONF
           echo "CONFIG_PACKAGE_filebrowser=y" >> $CONF
-          
-          # --- 5. UU 加速器依赖 ---
           echo "CONFIG_PACKAGE_curl=y" >> $CONF
           echo "CONFIG_PACKAGE_jq=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-tun=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y" >> $CONF
-          
-          # --- 6. IPTV 功能 ---
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
@@ -66,7 +53,7 @@ jobs:
         run: |
           cp configs/an7581.config .config
           make defconfig
-          
+
           # --- WiFi 默认配置 ---
           WIRELESS="package/base-files/files/etc/config/wireless"
           if [ -f "$WIRELESS" ]; then
@@ -75,7 +62,7 @@ jobs:
             sed -i "s/option encryption .*/option encryption 'none'/" $WIRELESS
             sed -i "s/option txpower .*/option txpower '27'/" $WIRELESS
           fi
-          
+
           # --- 修改默认 LAN IP ---
           sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
 
@@ -88,5 +75,5 @@ jobs:
       - name: Upload Firmware
         uses: actions/upload-artifact@v4
         with:
-          name: PonWrt-HG5585F-CT
+          name: PonWrt-HG5585F
           path: bin/targets/airoha/an7581/
