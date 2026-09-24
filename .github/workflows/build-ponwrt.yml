@@ -1,4 +1,4 @@
-name: Build PonWrt for HG5585F
+name: Build PonWrt Custom
 
 on:
   workflow_dispatch:
@@ -10,7 +10,7 @@ jobs:
       fail-fast: true
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Install Dependencies
         run: |
@@ -27,24 +27,52 @@ jobs:
       - name: Inject Packages
         run: |
           CONF="configs/an7581.config"
+
+          # --- 1. 主题修复与基础运行环境 ---
           echo "CONFIG_PACKAGE_lua=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-compat=y" >> $CONF
+
+          # --- 2. 基础功能与系统工具 ---
           echo "CONFIG_PACKAGE_luci-app-adblock=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ddns-go=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> $CONF
+          echo "CONFIG_PACKAGE_ttyd=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-autoreboot=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-commands=y" >> $CONF
+
+          # --- 3. USB 基础支持 ---
           echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> $CONF
-          echo "CONFIG_PACKAGE_luci-app-filebrowser=y" >> $CONF
-          echo "CONFIG_PACKAGE_filebrowser=y" >> $CONF
+
+          # --- 4. U 盘文件管理 (Harbor File) ---
+          echo "CONFIG_PACKAGE_luci-app-harbor-file=y" >> $CONF
+
+          # --- 5. U 盘磁盘管理 (DiskMan) ---
+          echo "CONFIG_PACKAGE_luci-app-diskman=y" >> $CONF
+
+          # --- 6. DNS 优化 (SmartDNS) ---
+          echo "CONFIG_PACKAGE_luci-app-smartdns=y" >> $CONF
+          echo "CONFIG_PACKAGE_smartdns=y" >> $CONF
+
+          # --- 7. 系统高级设置 (Advanced) ---
+          echo "CONFIG_PACKAGE_luci-app-advanced=y" >> $CONF
+
+          # --- 8. IP-MAC 绑定 (ARP Bind) ---
+          echo "CONFIG_PACKAGE_luci-app-arpbind=y" >> $CONF
+
+          # --- 9. 文本编辑器 ---
+          echo "CONFIG_PACKAGE_nano=y" >> $CONF
+
+          # --- 10. UU 加速器依赖 ---
           echo "CONFIG_PACKAGE_curl=y" >> $CONF
           echo "CONFIG_PACKAGE_jq=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-tun=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y" >> $CONF
+
+          # --- 11. IPTV 功能 ---
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
@@ -73,7 +101,7 @@ jobs:
         run: make -j$(nproc)
 
       - name: Upload Firmware
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: PonWrt-HG5585F
           path: bin/targets/airoha/an7581/
