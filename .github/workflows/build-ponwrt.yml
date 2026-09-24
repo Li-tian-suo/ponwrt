@@ -111,29 +111,20 @@ jobs:
           # --- 修改默认 LAN IP ---
           sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
 
-          # --- 强制默认主题为 Argon，避免 aurora 加载报错 ---
+          # --- 强制默认主题为 Argon (仅在文件存在时修改) ---
           LUCICFG="package/base-files/files/etc/config/luci"
-          mkdir -p "$(dirname "$LUCICFG")"
           if [ -f "$LUCICFG" ]; then
             sed -i "s|option mediaurlbase .*|option mediaurlbase '/luci-static/argon'|" "$LUCICFG"
-          else
-            cat > "$LUCICFG" <<'EOF'
-config core 'main'
-    option lang 'auto'
-    option mediaurlbase '/luci-static/argon'
-    option resourcebase '/luci-static/resources'
+          fi
 
-config extern 'flash_keep'
-    option uci_configs_enabled '1'
-    option uci_configs_preserve '1'
-    option uhttpd_acl_enabled '1'
-    option dropbear_acl_enabled '1'
-    option backup_config '1'
+      - name: Download Sources
+        run: make download -j8
 
-config internal 'languages'
-    option en 'English'
-    option zh_cn '简体中文'
+      - name: Compile
+        run: make -j$(nproc)
 
-config internal 'sauth'
-    option sessionpath '/tmp/luci-sessions'
-    option sessiontim
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: PonWrt-HG5585F
+          path: bin/targets/airoha/an7581/
