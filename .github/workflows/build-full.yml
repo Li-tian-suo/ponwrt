@@ -27,17 +27,11 @@ jobs:
       - name: Inject Packages
         run: |
           CONF="configs/an7581.config"
-
-          # --- 主题修复与基础运行环境 ---
           echo "CONFIG_PACKAGE_lua=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-compat=y" >> $CONF
-
-          # --- Argon 主题 ---
           echo "CONFIG_PACKAGE_luci-theme-argon=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-argon-config=y" >> $CONF
-
-          # --- 基础功能与系统工具（含 adblock / ddns-go）---
           echo "CONFIG_PACKAGE_luci-app-adblock=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ddns-go=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> $CONF
@@ -49,18 +43,12 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-advanced=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-arpbind=y" >> $CONF
           echo "CONFIG_PACKAGE_nano=y" >> $CONF
-
-          # --- USB 基础支持 ---
           echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> $CONF
-
-          # --- U 盘文件管理 / 磁盘管理 ---
           echo "CONFIG_PACKAGE_luci-app-harbor-file=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-diskman=y" >> $CONF
-
-          # --- FUSE 与文件系统支持 ---
           echo "CONFIG_PACKAGE_kmod-fuse=y" >> $CONF
           echo "CONFIG_PACKAGE_fuse3=y" >> $CONF
           echo "CONFIG_PACKAGE_fuse-utils=y" >> $CONF
@@ -70,12 +58,8 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-fs-ntfs3=y" >> $CONF
           echo "CONFIG_PACKAGE_parted=y" >> $CONF
           echo "CONFIG_PACKAGE_e2fsprogs=y" >> $CONF
-
-          # --- VLAN 支持 ---
           echo "CONFIG_PACKAGE_kmod-8021q=y" >> $CONF
           echo "CONFIG_PACKAGE_vconfig=y" >> $CONF
-
-          # --- OpenClash 及其核心依赖 ---
           echo "CONFIG_PACKAGE_luci-app-openclash=y" >> $CONF
           echo "CONFIG_PACKAGE_bash=y" >> $CONF
           echo "CONFIG_PACKAGE_curl=y" >> $CONF
@@ -89,12 +73,8 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-nft-tproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_dnsmasq-full=y" >> $CONF
           echo "CONFIG_PACKAGE_dnsmasq=y" >> $CONF
-
-          # --- UU 加速器依赖 ---
           echo "CONFIG_PACKAGE_jq=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y" >> $CONF
-
-          # --- IPTV 功能 ---
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
@@ -104,20 +84,30 @@ jobs:
           cp configs/an7581.config .config
           make defconfig
 
-          # --- 强制只保留 4 款设备 ---
           sed -i 's/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y/# & is not set/' .config
           for dev in fiberhome_hg5585f-ct fiberhome_hg5585f-cu nokia_xg-040g-md-ubi znxt_zn515xg-d; do
             sed -i "s/# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${dev} is not set/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${dev}=y/" .config
           done
           make defconfig
 
-          # --- 时区 Asia/Shanghai ---
           sed -i "s/option timezone .*/option timezone 'CST-8'/" package/base-files/files/etc/config/system
           sed -i "s/option zonename .*/option zonename 'Asia\/Shanghai'/" package/base-files/files/etc/config/system
 
-          # --- WiFi 默认配置 ---
           WIRELESS="package/base-files/files/etc/config/wireless"
           if [ -f "$WIRELESS" ]; then
             sed -i "s/option ssid .*/option ssid 'ImmortalWrt'/" $WIRELESS
             sed -i "s/option country .*/option country 'CN'/" $WIRELESS
-            sed -i "s/option
+            sed -i "s/option encryption .*/option encryption 'none'/" $WIRELESS
+          fi
+
+          sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
+
+          LUCICFG="package/base-files/files/etc/config/luci"
+          if [ -f "$LUCICFG" ]; then
+            sed -i "s|option mediaurlbase .*|option mediaurlbase '/luci-static/argon'|" "$LUCICFG"
+          fi
+
+      - name: Download Sources
+        run: make download -j8
+
+ 
