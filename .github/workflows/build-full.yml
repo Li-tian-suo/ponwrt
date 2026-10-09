@@ -47,15 +47,10 @@ jobs:
           echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> $CONF
-          echo "CONFIG_PACKAGE_luci-app-harbor-file=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-diskman=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fuse=y" >> $CONF
-          echo "CONFIG_PACKAGE_fuse3=y" >> $CONF
-          echo "CONFIG_PACKAGE_fuse-utils=y" >> $CONF
           echo "CONFIG_PACKAGE_block-mount=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-fs-ext4=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-fs-exfat=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fs-ntfs3=y" >> $CONF
           echo "CONFIG_PACKAGE_parted=y" >> $CONF
           echo "CONFIG_PACKAGE_e2fsprogs=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-8021q=y" >> $CONF
@@ -111,7 +106,7 @@ jobs:
         run: make download -j8
 
       - name: Compile
-        run: make -j$(nproc)
+        run: make -j$(nproc) || make -j1 V=s
 
       - name: Upload Firmware
         uses: actions/upload-artifact@v7
