@@ -124,8 +124,14 @@ jobs:
             sed -i "s/option txpower .*/option txpower '27'/" $WIRELESS
           fi
 
-          # --- 默认时区 Asia/Shanghai（北京时间）---
-          sed -i "s/option timezone .*/option timezone 'CST-8'/" package/base-files/files/etc/config/system
-          sed -i "s/option zonename .*/option zonename 'Asia\/Shanghai'/" package/base-files/files/etc/config/system
+          # --- 写入默认时区配置（用 files/ 覆盖，绕开源码路径问题）---
+          mkdir -p files/etc/config
+          cat > files/etc/config/system <<'SYSEOF'
+config system
+    option hostname 'ImmortalWrt'
+    option timezone 'CST-8'
+    option zonename 'Asia/Shanghai'
+SYSEOF
 
-          # --- 修改默认 LAN I
+          # --- 修改默认 LAN IP ---
+       
