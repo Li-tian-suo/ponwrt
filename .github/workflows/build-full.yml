@@ -27,15 +27,11 @@ jobs:
       - name: Inject Packages
         run: |
           CONF="configs/an7581.config"
-
-          # ---------- LuCI 基础与主题 ----------
           echo "CONFIG_PACKAGE_lua=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-lua-runtime=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-compat=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-theme-argon=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-argon-config=y" >> $CONF
-
-          # ---------- 常用应用 ----------
           echo "CONFIG_PACKAGE_luci-app-adblock=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ddns-go=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-ttyd=y" >> $CONF
@@ -47,67 +43,43 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-advanced=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-arpbind=y" >> $CONF
           echo "CONFIG_PACKAGE_nano=y" >> $CONF
-          echo "CONFIG_PACKAGE_bash=y" >> $CONF
-          echo "CONFIG_PACKAGE_curl=y" >> $CONF
-          echo "CONFIG_PACKAGE_ca-bundle=y" >> $CONF
-          echo "CONFIG_PACKAGE_jq=y" >> $CONF
-          echo "CONFIG_PACKAGE_unzip=y" >> $CONF
-
-          # ---------- USB 3.0 存储支持 ----------
           echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-usb-storage=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-storage-uas=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-usb-storage-extras=y" >> $CONF
-          echo "CONFIG_PACKAGE_usbutils=y" >> $CONF
-
-          # ---------- 文件系统（内核态，互不冲突） ----------
-          echo "CONFIG_PACKAGE_kmod-fs-ext4=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fs-vfat=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fs-exfat=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fs-ntfs3=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fs-nls-cp936=y" >> $CONF
-
-          # ---------- 分区/格式化工具 ----------
-          echo "CONFIG_PACKAGE_e2fsprogs=y" >> $CONF
-          echo "CONFIG_PACKAGE_exfatprogs=y" >> $CONF
-          echo "CONFIG_PACKAGE_parted=y" >> $CONF
-          echo "CONFIG_PACKAGE_block-mount=y" >> $CONF
-          echo "CONFIG_PACKAGE_luci-app-diskman=y" >> $CONF
-
-          # ---------- NTFS 用户态工具 ----------
-          echo "CONFIG_PACKAGE_ntfs3-mount=y" >> $CONF
-          echo "CONFIG_PACKAGE_ntfs-3g-utils=y" >> $CONF
-
-          # ---------- USB 测速工具 ----------
-          echo "CONFIG_PACKAGE_hdparm=y" >> $CONF
-          echo "CONFIG_PACKAGE_fio=y" >> $CONF
-
-          # ---------- Samba 网络共享 ----------
-          echo "CONFIG_PACKAGE_luci-app-samba4=y" >> $CONF
-          echo "CONFIG_PACKAGE_samba4-server=y" >> $CONF
-          echo "CONFIG_PACKAGE_kmod-fs-cifs=y" >> $CONF
-
-          # ---------- 网络及其他 ----------
           echo "CONFIG_PACKAGE_kmod-usb-net-rndis=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net-cdc-ether=y" >> $CONF
+          echo "CONFIG_PACKAGE_usbutils=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-diskman=y" >> $CONF
+          echo "CONFIG_PACKAGE_block-mount=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fs-ext4=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fs-exfat=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fs-vfat=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fs-ntfs3=y" >> $CONF
+          echo "CONFIG_PACKAGE_exfatprogs=y" >> $CONF
+          echo "CONFIG_PACKAGE_parted=y" >> $CONF
+          echo "CONFIG_PACKAGE_e2fsprogs=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fuse=y" >> $CONF
+          echo "CONFIG_PACKAGE_fuse3=y" >> $CONF
+          echo "CONFIG_PACKAGE_fuse-utils=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-8021q=y" >> $CONF
           echo "CONFIG_PACKAGE_vconfig=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-openclash=y" >> $CONF
+          echo "CONFIG_PACKAGE_bash=y" >> $CONF
+          echo "CONFIG_PACKAGE_curl=y" >> $CONF
+          echo "CONFIG_PACKAGE_ca-bundle=y" >> $CONF
           echo "CONFIG_PACKAGE_ip-full=y" >> $CONF
           echo "CONFIG_PACKAGE_ruby=y" >> $CONF
           echo "CONFIG_PACKAGE_ruby-yaml=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-tun=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-inet-diag=y" >> $CONF
+          echo "CONFIG_PACKAGE_unzip=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-nft-tproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_dnsmasq-full=y" >> $CONF
+          echo "CONFIG_PACKAGE_dnsmasq=y" >> $CONF
+          echo "CONFIG_PACKAGE_jq=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-nf-conntrack-netlink=y" >> $CONF
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
-
-          # ---------- 显式禁用冲突项 ----------
-          echo "# CONFIG_PACKAGE_ntfs-3g is not set" >> $CONF
-          echo "# CONFIG_PACKAGE_dnsmasq is not set" >> $CONF
 
       - name: Load Config & Customize Defaults
         run: |
@@ -117,5 +89,29 @@ jobs:
           sed -i "s/timezone='UTC'/timezone='CST-8'/" package/base-files/files/bin/config_generate
           sed -i "s/zonename='UTC'/zonename='Asia\/Shanghai'/" package/base-files/files/bin/config_generate
 
-          WIRELESS="package/base-files/files/etc/config/wireless"
-          if [ -f "
+          sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
+
+          LUCICFG="package/base-files/files/etc/config/luci"
+          if [ -f "$LUCICFG" ]; then
+            sed -i "s|option mediaurlbase .*|option mediaurlbase '/luci-static/argon'|" "$LUCICFG"
+          fi
+
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-wifi-custom <<'UCIEOF'
+#!/bin/sh
+uci set wireless.radio0.country='CN'
+uci set wireless.radio1.country='CN'
+uci set wireless.radio0.htmode='HT40'
+uci set wireless.radio1.htmode='VHT160'
+uci set wireless.radio0.disabled='0'
+uci set wireless.radio1.disabled='0'
+uci set wireless.default_radio0.ssid='ImmortalWrt'
+uci set wireless.default_radio1.ssid='ImmortalWrt'
+uci set wireless.default_radio0.encryption='none'
+uci set wireless.default_radio1.encryption='none'
+uci set wireless.default_radio0.disabled='0'
+uci set wireless.default_radio1.disabled='0'
+uci commit wireless
+exit 0
+UCIEOF
+          chmod +x files/etc/uci-defaults
