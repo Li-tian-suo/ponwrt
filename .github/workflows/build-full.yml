@@ -79,12 +79,6 @@ jobs:
           cp configs/an7581.config .config
           make defconfig
 
-          sed -i 's/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_.*=y/# & is not set/' .config
-          for dev in fiberhome_hg5585f-ct fiberhome_hg5585f-cu nokia_xg-040g-md-ubi znxt_zn515xg-d; do
-            sed -i "s/# CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${dev} is not set/CONFIG_TARGET_DEVICE_airoha_an7581_DEVICE_${dev}=y/" .config
-          done
-          make defconfig
-
           sed -i "s/timezone='UTC'/timezone='CST-8'/" package/base-files/files/bin/config_generate
           sed -i "s/zonename='UTC'/zonename='Asia\/Shanghai'/" package/base-files/files/bin/config_generate
 
