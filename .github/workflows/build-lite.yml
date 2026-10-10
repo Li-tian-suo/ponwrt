@@ -49,6 +49,9 @@ jobs:
           echo "CONFIG_PACKAGE_block-mount=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-fs-ext4=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-fs-exfat=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fs-vfat=y" >> $CONF
+          echo "CONFIG_PACKAGE_kmod-fs-ntfs3=y" >> $CONF
+          echo "CONFIG_PACKAGE_exfatprogs=y" >> $CONF
           echo "CONFIG_PACKAGE_parted=y" >> $CONF
           echo "CONFIG_PACKAGE_e2fsprogs=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-8021q=y" >> $CONF
