@@ -68,36 +68,44 @@ jobs:
         run: |
           cp configs/an7581.config .config
           make defconfig
-
-          sed -i "s/timezone='UTC'/timezone='CST-8'/" package/base-files/files/bin/config_generate
-          sed -i "s/zonename='UTC'/zonename='Asia\/Shanghai'/" package/base-files/files/bin/config_generate
-
           sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
-
-          LUCICFG="package/base-files/files/etc/config/luci"
-          if [ -f "$LUCICFG" ]; then
-            sed -i "s|option mediaurlbase .*|option mediaurlbase '/luci-static/argon'|" "$LUCICFG"
-          fi
-
+          rm -rf files
           mkdir -p files/etc/uci-defaults
-          printf '%s\n' \
-            '#!/bin/sh' \
-            "uci set wireless.radio0.country='CN'" \
-            "uci set wireless.radio1.country='CN'" \
-            "uci set wireless.radio0.htmode='HT40'" \
-            "uci set wireless.radio1.htmode='VHT160'" \
-            "uci set wireless.radio0.disabled='0'" \
-            "uci set wireless.radio1.disabled='0'" \
-            "uci set wireless.default_radio0.ssid='ImmortalWrt'" \
-            "uci set wireless.default_radio1.ssid='ImmortalWrt'" \
-            "uci set wireless.default_radio0.encryption='none'" \
-            "uci set wireless.default_radio1.encryption='none'" \
-            "uci set wireless.default_radio0.disabled='0'" \
-            "uci set wireless.default_radio1.disabled='0'" \
-            'uci commit wireless' \
-            'exit 0' \
-            > files/etc/uci-defaults/99-wifi-custom
-          chmod +x files/etc/uci-defaults/99-wifi-custom
+          echo '#!/bin/sh' > files/etc/uci-defaults/99-custom
+          echo 'uci set system.@system[0].timezone=CST-8' >> files/etc/uci-defaults/99-custom
+          echo 'uci set system.@system[0].zonename=Asia/Shanghai' >> files/etc/uci-defaults/99-custom
+          echo 'uci set luci.main.mediaurlbase=/luci-static/argon' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.radio0.country=CN' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.radio1.country=CN' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.radio0.htmode=HT40' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.radio1.htmode=VHT160' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.radio0.disabled=0' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.radio1.disabled=0' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.default_radio0.ssid=ImmortalWrt' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.default_radio1.ssid=ImmortalWrt' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.default_radio0.encryption=none' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.default_radio1.encryption=none' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.default_radio0.disabled=0' >> files/etc/uci-defaults/99-custom
+          echo 'uci set wireless.default_radio1.disabled=0' >> files/etc/uci-defaults/99-custom
+          echo 'uci commit system' >> files/etc/uci-defaults/99-custom
+          echo 'uci commit luci' >> files/etc/uci-defaults/99-custom
+          echo 'uci commit wireless' >> files/etc/uci-defaults/99-custom
+          echo 'exit 0' >> files/etc/uci-defaults/99-custom
+          chmod +x files/etc/uci-defaults/99-custom
+
+          mkdir -p files/usr/bin files/etc/init.d files/etc/rc.d
+          wget -O files/usr/bin/homebox https://github.com/XGHeaven/homebox/releases/latest/download/homebox-linux-arm64-musl
+          chmod +x files/usr/bin/homebox
+          echo '#!/bin/sh /etc/rc.common' > files/etc/init.d/homebox
+          echo 'START=99' >> files/etc/init.d/homebox
+          echo 'start() {' >> files/etc/init.d/homebox
+          echo '  /usr/bin/homebox serve --port 3300 --host 0.0.0.0 >/dev/null 2>&1 &' >> files/etc/init.d/homebox
+          echo '}' >> files/etc/init.d/homebox
+          echo 'stop() {' >> files/etc/init.d/homebox
+          echo '  killall homebox' >> files/etc/init.d/homebox
+          echo '}' >> files/etc/init.d/homebox
+          chmod +x files/etc/init.d/homebox
+          ln -sf ../init.d/homebox files/etc/rc.d/S99homebox
 
       - name: Download Sources
         run: make download -j8
