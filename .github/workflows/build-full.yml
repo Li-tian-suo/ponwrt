@@ -85,19 +85,20 @@ jobs:
         run: |
           cp configs/an7581.config .config
           make defconfig
-
           sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
-
+          rm -rf files
           mkdir -p files/etc/uci-defaults
-          echo '#!/bin/sh' > files/etc/uci-defaults/99-custom
-          echo 'uci set system.@system[0].timezone=CST-8' >> files/etc/uci-defaults/99-custom
-          echo 'uci set system.@system[0].zonename=Asia/Shanghai' >> files/etc/uci-defaults/99-custom
-          echo 'uci set luci.main.mediaurlbase=/luci-static/argon' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.radio0.country=CN' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.radio1.country=CN' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.radio0.htmode=HT40' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.radio1.htmode=VHT160' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.radio0.disabled=0' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.radio1.disabled=0' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.default_radio0.ssid=ImmortalWrt' >> files/etc/uci-defaults/99-custom
-          echo 'uci set wireless.default_radio1.ssid=ImmortalWrt' >> files/etc/uci-defaults/
+          printf '#!/bin/sh\nuci set system.@system[0].timezone=CST-8\nuci set system.@system[0].zonename=Asia/Shanghai\nuci set luci.main.mediaurlbase=/luci-static/argon\nuci set wireless.radio0.country=CN\nuci set wireless.radio1.country=CN\nuci set wireless.radio0.htmode=HT40\nuci set wireless.radio1.htmode=VHT160\nuci set wireless.radio0.disabled=0\nuci set wireless.radio1.disabled=0\nuci set wireless.default_radio0.ssid=ImmortalWrt\nuci set wireless.default_radio1.ssid=ImmortalWrt\nuci set wireless.default_radio0.encryption=none\nuci set wireless.default_radio1.encryption=none\nuci set wireless.default_radio0.disabled=0\nuci set wireless.default_radio1.disabled=0\nuci commit system\nuci commit luci\nuci commit wireless\nexit 0\n' > files/etc/uci-defaults/99-custom
+          chmod +x files/etc/uci-defaults/99-custom
+
+      - name: Download Sources
+        run: make download -j8
+
+      - name: Compile
+        run: make -j$(nproc) || make -j1 V=s
+
+      - name: Upload Firmware
+        uses: actions/upload-artifact@v7
+        with:
+          name: PonWrt-Full
+          path: bin/targets/airoha/an7581/
