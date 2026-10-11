@@ -21,7 +21,6 @@ jobs:
 
       - name: Update Feeds
         run: |
-          git clone https://github.com/ZASENJC/homebox-openwrt.git package/homebox
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -81,7 +80,6 @@ jobs:
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
-          echo "CONFIG_PACKAGE_homebox=y" >> $CONF
 
       - name: Load Config & Customize Defaults
         run: |
@@ -111,6 +109,20 @@ jobs:
           echo 'uci commit wireless' >> files/etc/uci-defaults/99-custom
           echo 'exit 0' >> files/etc/uci-defaults/99-custom
           chmod +x files/etc/uci-defaults/99-custom
+
+          mkdir -p files/usr/bin files/etc/init.d files/etc/rc.d
+          wget -O files/usr/bin/homebox https://github.com/XGHeaven/homebox/releases/latest/download/homebox-linux-arm64-musl
+          chmod +x files/usr/bin/homebox
+          echo '#!/bin/sh /etc/rc.common' > files/etc/init.d/homebox
+          echo 'START=99' >> files/etc/init.d/homebox
+          echo 'start() {' >> files/etc/init.d/homebox
+          echo '  /usr/bin/homebox serve --port 3300 --host 0.0.0.0 >/dev/null 2>&1 &' >> files/etc/init.d/homebox
+          echo '}' >> files/etc/init.d/homebox
+          echo 'stop() {' >> files/etc/init.d/homebox
+          echo '  killall homebox' >> files/etc/init.d/homebox
+          echo '}' >> files/etc/init.d/homebox
+          chmod +x files/etc/init.d/homebox
+          ln -sf ../init.d/homebox files/etc/rc.d/S99homebox
 
       - name: Download Sources
         run: make download -j8
