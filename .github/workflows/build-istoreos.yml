@@ -21,10 +21,10 @@ jobs:
 
       - name: Update Feeds
         run: |
-          echo 'src-git istore https://github.com/linkease/istore;main' >> feeds.conf.default
-          echo 'src-git nas https://github.com/linkease/nas-packages.git;master' >> feeds.conf.default
-          echo 'src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main' >> feeds.conf.default
-          echo 'src-git quickstart https://github.com/istoreos/quickstart.git' >> feeds.conf.default
+          echo "src-git istore https://github.com/linkease/istore;main" >> feeds.conf.default
+          echo "src-git nas https://github.com/linkease/nas-packages.git;master" >> feeds.conf.default
+          echo "src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main" >> feeds.conf.default
+          echo "src-git quickstart https://github.com/istoreos/quickstart.git" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -97,4 +97,7 @@ jobs:
           sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
           rm -rf files
           mkdir -p files/etc/uci-defaults
-          printf '#!/bin/sh\nuci set system.@system[0].timezone=CST-8\nuci set system.@system[0].zonename=Asia/Shanghai\nuci set luci.main.mediaurlbase=/luci-static/argon\nuci set wireless.radio0.country=CN\nuci set wireless.radio1.country=CN\nuci set wireless.radio0.htmode=HT40\nuci set wireless.radio1.htmode=VHT160\nuci set wireless.radio0.disabled=0\n
+          echo '#!/bin/sh' > files/etc/uci-defaults/99-custom
+          echo 'uci set system.@system[0].timezone=CST-8' >> files/etc/uci-defaults/99-custom
+          echo 'uci set system.@system[0].zonename=Asia/Shanghai' >> files/etc/uci-defaults/99-custom
+          echo 'uci set luci.main.mediaurlbase=/luci-static/argon' >> files/etc/uci-defaults/99-cu
