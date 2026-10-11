@@ -92,20 +92,6 @@ jobs:
           echo 'uci commit wireless' >> files/etc/uci-defaults/99-custom
           echo 'exit 0' >> files/etc/uci-defaults/99-custom
           chmod +x files/etc/uci-defaults/99-custom
-          mkdir -p files/usr/bin files/etc/init.d files/etc/rc.d
-          HB_URL=$(wget -qO- https://api.github.com/repos/XGHeaven/homebox/releases/latest | grep -o '"browser_download_url": *"[^"]*aarch64[^"]*musl[^"]*"' | head -1 | cut -d'"' -f4)
-          wget -O files/usr/bin/homebox "$HB_URL"
-          chmod +x files/usr/bin/homebox
-          echo '#!/bin/sh /etc/rc.common' > files/etc/init.d/homebox
-          echo 'START=99' >> files/etc/init.d/homebox
-          echo 'start() {' >> files/etc/init.d/homebox
-          echo '  /usr/bin/homebox serve --port 3300 --host 0.0.0.0 >/dev/null 2>&1 &' >> files/etc/init.d/homebox
-          echo '}' >> files/etc/init.d/homebox
-          echo 'stop() {' >> files/etc/init.d/homebox
-          echo '  killall homebox' >> files/etc/init.d/homebox
-          echo '}' >> files/etc/init.d/homebox
-          chmod +x files/etc/init.d/homebox
-          ln -sf ../init.d/homebox files/etc/rc.d/S99homebox
 
       - name: Download Sources
         run: make download -j8
