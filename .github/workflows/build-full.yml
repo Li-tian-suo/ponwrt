@@ -80,8 +80,6 @@ jobs:
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
-          echo "CONFIG_PACKAGE_qt5svg=n" >> $CONF
-          echo "CONFIG_PACKAGE_libqt5svg=n" >> $CONF
 
       - name: Load Config & Customize Defaults
         run: |
@@ -99,14 +97,11 @@ jobs:
           fi
 
           mkdir -p files/etc/uci-defaults
-          printf '%s\n' '#!/bin/sh' \
-            "uci set wireless.radio0.country='CN'" \
-            "uci set wireless.radio1.country='CN'" \
-            "uci set wireless.radio0.htmode='HT40'" \
-            "uci set wireless.radio1.htmode='VHT160'" \
-            "uci set wireless.radio0.disabled='0'" \
-            "uci set wireless.radio1.disabled='0'" \
-            "uci set wireless.default_radio0.ssid='ImmortalWrt'" \
-            "uci set wireless.default_radio1.ssid='ImmortalWrt'" \
-            "uci set wireless.default_radio0.encryption='none'" \
-     
+          echo '#!/bin/sh' > files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wireless.radio0.country='CN'" >> files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wireless.radio1.country='CN'" >> files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wireless.radio0.htmode='HT40'" >> files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wireless.radio1.htmode='VHT160'" >> files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wireless.radio0.disabled='0'" >> files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wireless.radio1.disabled='0'" >> files/etc/uci-defaults/99-wifi-custom
+          echo "uci set wir
