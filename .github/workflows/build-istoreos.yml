@@ -1,4 +1,4 @@
-name: Build PonWrt Full
+name: Build PonWrt iStoreOS
 
 on:
   workflow_dispatch:
@@ -21,6 +21,10 @@ jobs:
 
       - name: Update Feeds
         run: |
+          echo "src-git istore https://github.com/linkease/istore;main" >> feeds.conf.default
+          echo "src-git nas https://github.com/linkease/nas-packages.git;master" >> feeds.conf.default
+          echo "src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main" >> feeds.conf.default
+          echo "src-git quickstart https://github.com/istoreos/quickstart.git" >> feeds.conf.default
           ./scripts/feeds update -a
           ./scripts/feeds install -a
 
@@ -80,6 +84,22 @@ jobs:
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-istorex=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-store=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-lib-xterm=y" >> $CONF
+          echo "CONFIG_PACKAGE_luci-app-quickstart=y" >> $CONF
+          echo "CONFIG_PACKAGE_qt5base-gui=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5svg=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-controls2=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-quick-shapes=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-quick-widgets=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-qml-module-qttest=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-qml-module-qtquick-layouts=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-qml-module-qtquick-shapes=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-qml-module-qtquick-window2=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-qml-module-qtlabs-sharedimage=n" >> $CONF
+          echo "CONFIG_PACKAGE_qt5quick-qml-module-qtlabs-wavefrontmesh=n" >> $CONF
 
       - name: Load Config & Customize Defaults
         run: |
@@ -138,5 +158,5 @@ jobs:
       - name: Upload Firmware
         uses: actions/upload-artifact@v7
         with:
-          name: PonWrt-Full
+          name: PonWrt-iStoreOS
           path: bin/targets/airoha/an7581/
