@@ -22,6 +22,9 @@ jobs:
       - name: Update Feeds
         run: |
           ./scripts/feeds update -a
+
+      - name: Install Feeds
+        run: |
           ./scripts/feeds install -a
 
       - name: Inject Packages
