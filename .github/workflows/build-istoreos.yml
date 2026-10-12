@@ -21,14 +21,9 @@ jobs:
 
       - name: Update Feeds
         run: |
-          echo "src-git istore https://github.com/linkease/istore" >> feeds.conf.default
-          echo "src-git nas https://github.com/linkease/nas-packages.git" >> feeds.conf.default
-          echo "src-git nas_luci https://github.com/linkease/nas-packages-luci.git" >> feeds.conf.default
-          cat feeds.conf.default
+          git clone https://github.com/linkease/istore.git package/istore
+          git clone https://github.com/linkease/nas-packages-luci.git package/nas_luci
           ./scripts/feeds update -a
-
-      - name: Install Feeds
-        run: |
           ./scripts/feeds install -a
 
       - name: Inject Packages
