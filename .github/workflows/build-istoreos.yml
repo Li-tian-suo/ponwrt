@@ -25,6 +25,9 @@ jobs:
           echo "src-git nas https://github.com/linkease/nas-packages.git;master" >> feeds.conf.default
           echo "src-git nas_luci https://github.com/linkease/nas-packages-luci.git;main" >> feeds.conf.default
           ./scripts/feeds update -a
+
+      - name: Install Feeds
+        run: |
           ./scripts/feeds install -a
 
       - name: Inject Packages
@@ -83,11 +86,7 @@ jobs:
           echo "CONFIG_PACKAGE_igmpproxy=y" >> $CONF
           echo "CONFIG_PACKAGE_udpxy=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-udpxy=y" >> $CONF
-          echo "CONFIG_PACKAGE_luci-app-istorex=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-store=y" >> $CONF
-          echo "CONFIG_PACKAGE_quickstart=y" >> $CONF
-          echo "CONFIG_PACKAGE_quickstart-netpolicy=y" >> $CONF
-          echo "CONFIG_PACKAGE_luci-app-quickstart=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-lib-taskd=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-lib-xterm=y" >> $CONF
           echo "CONFIG_PACKAGE_taskd=y" >> $CONF
