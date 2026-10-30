@@ -1,0 +1,21 @@
+# 追加到 ponwrt 的 target/linux/airoha/image/an7583.mk 末尾
+
+define Device/fiberhome_hg5380a
+	$(call Device/FitImageLzma)
+	DEVICE_VENDOR := FiberHome
+	DEVICE_MODEL := HG5380A
+	DEVICE_DTS := an7583-fiberhome-hg5380a
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	KERNEL_SIZE := 6144k
+	DEVICE_PACKAGES := kmod-phy-airoha-en8811h \
+		kmod-mt7915e kmod-mt7916-firmware \
+		kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond
+	IMAGES := sysupgrade.bin
+	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
+		pad-rootfs | append-metadata
+	ARTIFACT/preloader.bin := an7583-preloader hg5380a
+	ARTIFACT/bl31-uboot.fip := an7583-bl31-uboot hg5380a
+	ARTIFACTS := preloader.bin bl31-uboot.fip
+endef
+TARGET_DEVICES += fiberhome_hg5380a

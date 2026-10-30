@@ -1,0 +1,251 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * FiberHome HG5380A — Airoha AN7583
+ *
+ * 由原厂 KernelA 内 DTB（15704 字节，0x3100 处）反编译结果整理，
+ * 结构参照 ponwrt 的 an7583-nokia_xg-040g-mf-common.dtsi 与
+ * an7581-fiberhome-hg5382a.dts。
+ *
+ * TODO(上机确认)：
+ *   1. reset 按键 GPIO（当前暂用 GPIO0，与原厂 DTS 的 gpio-keys 一致前需核实）
+ *   2. LED 的 GPIO 与颜色（原厂 DTS 无 gpio-leds 节点，灯由用户态控制）
+ *   3. 光模块 BOSA 的 I2C 地址（0x50/0x51）与 tx-disable 引脚（暂用 GPIO15）
+ *   4. factory(UBI 卷 fhdata) 里 MAC/SN/校准的 nvmem 布局，未接上前 MAC 为随机
+ *   5. 2.5G PHY EN8811H 的 MDIO 地址（暂用 0xf）与复位 GPIO（暂用 34）
+ */
+/dts-v1/;
+
+/* Firmware/ATF 占用 DRAM 前 2 MiB。 */
+/memreserve/ 0x80000000 0x200000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "an7583.dtsi"
+
+/ {
+	model = "FiberHome HG5380A";
+	compatible = "fiberhome,hg5380a", "airoha,an7583";
+
+	aliases {
+		serial0 = &uart1;
+	};
+
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon";
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x20000000>;	/* 512 MiB */
+	};
+
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			/* TODO: 原厂 reset 键 GPIO 待确认 */
+			gpios = <&an7583_pinctrl 0 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+};
+
+&an7583_pinctrl {
+	gpio-ranges = <&an7583_pinctrl 0 2 53>;
+
+	pon_pins: pon-pins {
+		mux {
+			function = "pon";
+			groups = "pon_tx_disable_gpio";
+		};
+	};
+
+	mdio0_pins: mdio0-pins {
+		mux {
+			function = "mdio";
+			groups = "mdio";
+		};
+		conf {
+			pins = "mdio_0";
+			output-high;
+		};
+	};
+
+	i2c0_pins: i2c0-pins {
+		mux {
+			function = "i2c";
+			groups = "i2c0";
+		};
+	};
+
+	spi_pins: spi-pins {
+		mux {
+			function = "spi";
+			groups = "spi";
+		};
+	};
+};
+
+&snfi {
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_pins>;
+};
+
+&spi_nand {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x280000>;
+			read-only;
+		};
+
+		partition@280000 {
+			label = "bootflag";
+			reg = <0x280000 0x80000>;
+		};
+
+		partition@300000 {
+			label = "KernelA";
+			reg = <0x300000 0x600000>;
+		};
+
+		partition@900000 {
+			label = "RootfsA";
+			reg = <0x900000 0x2800000>;
+		};
+
+		partition@3100000 {
+			label = "KernelB";
+			reg = <0x3100000 0x600000>;
+		};
+
+		partition@3700000 {
+			label = "RootfsB";
+			reg = <0x3700000 0x2800000>;
+		};
+
+		partition@5f00000 {
+			label = "apps";
+			reg = <0x5f00000 0x6800000>;
+		};
+
+		partition@c700000 {
+			label = "frameworka";
+			reg = <0xc700000 0x1000000>;
+		};
+
+		partition@d700000 {
+			label = "frameworkb";
+			reg = <0xd700000 0x1000000>;
+		};
+
+		/* UBI 单卷 "fhdata"：MAC / SN / 光学校准，只读保留 */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+		};
+	};
+};
+
+&i2c0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins>;
+
+	hg5380a_bosa: optical-front-end@51 {
+		compatible = "fiberhome,hg5x-bosa", "airoha,paged-bosa";
+		reg = <0x51>;
+
+		/* TODO: BEN 极性、tx-disable GPIO 待上机确认 */
+		fiberhome,ben-active-high;
+		tx-disable-gpios = <&an7583_pinctrl 15 GPIO_ACTIVE_HIGH>;
+		status = "okay";
+	};
+};
+
+&mdio_0 {
+	/* Airoha EN8811H 2.5G PHY */
+	en8811: ethernet-phy@f {
+		compatible = "ethernet-phy-id03a2.a411";
+		reg = <0xf>;
+		reset-gpios = <&an7583_pinctrl 34 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <20000>;
+	};
+};
+
+&switch {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio0_pins>;
+};
+
+&gsw_port2 {
+	status = "okay";
+	label = "lan2";
+};
+
+&gsw_phy2 {
+	status = "okay";
+	interrupts = <2>;
+};
+
+&gsw_port3 {
+	status = "okay";
+	label = "lan3";
+};
+
+&gsw_phy3 {
+	status = "okay";
+	interrupts = <3>;
+};
+
+&gsw_port4 {
+	status = "okay";
+	label = "lan4";
+};
+
+&gsw_phy4 {
+	status = "okay";
+	interrupts = <4>;
+};
+
+&gdm3 {
+	status = "okay";
+	openwrt,netdev-name = "lan1";
+	phy-handle = <&en8811>;
+	phy-mode = "2500base-x";
+};
+
+&eth {
+	status = "okay";
+};
+
+&npu {
+	status = "okay";
+};
+
+&pon_pcs {
+	status = "okay";
+};
+
+&xpon_mac {
+	pinctrl-names = "default";
+	pinctrl-0 = <&pon_pins>;
+	optical-front-end = <&hg5380a_bosa>;
+	data-path = <&gdm2>;
+	status = "okay";
+};
+
+&gdm2 {
+	airoha,pon-data-path;
+	status = "okay";
+};
