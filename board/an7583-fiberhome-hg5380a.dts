@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: GPL-2.0-only OR MIT
+﻿// SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
  * FiberHome HG5380A — Airoha AN7583
  *
@@ -91,11 +91,14 @@
 };
 
 &snfi {
+	status = "okay";
 	pinctrl-names = "default";
 	pinctrl-0 = <&spi_pins>;
 };
 
 &spi_nand {
+	status = "okay";
+
 	partitions {
 		compatible = "fixed-partitions";
 		#address-cells = <1>;
@@ -229,8 +232,10 @@
 	status = "okay";
 };
 
+/* AN7583 的 NPU 在 OpenWrt 下未启用（与 Nokia/EVB 参考板一致），
+ * 启用会在 probe 阶段触发看门狗复位 */
 &npu {
-	status = "okay";
+	status = "disabled";
 };
 
 &pon_pcs {
