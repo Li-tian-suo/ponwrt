@@ -111,6 +111,18 @@ jobs:
           EOF
             sed -i 's/^ *//' .config
           fi
+          # 两个档位都要的板级驱动与 PON 组件（设备级 DEVICE_PACKAGES 在本仓库不生效，显式加）
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_kmod-mt7915e=y
+          CONFIG_PACKAGE_kmod-mt7916-firmware=y
+          CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-en7572=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
+          CONFIG_PACKAGE_luci-app-pon=y
+          EOF
+          sed -i 's/^ *//' .config
           make defconfig
           echo "--- device selection ---"
           grep -E '^CONFIG_TARGET_DEVICE_airoha' .config | grep '=y' || {
