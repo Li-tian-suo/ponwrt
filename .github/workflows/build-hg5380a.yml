@@ -4,6 +4,14 @@ name: Build HG5380A (AN7583 FiberHome)
 # 前置：仓库里需要有 board/ 目录（本包提供的两个文件）
 on:
   workflow_dispatch:
+    inputs:
+      profile:
+        description: '构建档位：minimal=最小验证版（推荐首次），full=完整包集合'
+        type: choice
+        options:
+          - minimal
+          - full
+        default: minimal
 
 jobs:
   build:
@@ -41,7 +49,7 @@ jobs:
 
       - name: Provide libffi
         run: |
-          # immortalwrt/packages 缺 libs/libffi，python3 会因 ffi.h 缺失编译失败
+          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败
           git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
           git -C /tmp/owrt sparse-checkout set package/libs/libffi
           mkdir -p package/libs
@@ -51,19 +59,39 @@ jobs:
         run: ./scripts/feeds install -a
 
       - name: Configure
+        env:
+          PROFILE: ${{ inputs.profile || 'minimal' }}
         run: |
-          cp configs/an7583.config .config
-          # 换掉原来的 7583 设备选择
-          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
-          echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y' >> .config
-          # 复用你在 7581 上用的软件包集合（只取 CONFIG_PACKAGE_ 行，避免带入 target 符号）
-          if [ -f configs/an7581-tyfza1-packages.config ]; then
-            grep '^CONFIG_PACKAGE_' configs/an7581-tyfza1-packages.config >> .config || true
+          echo "profile = $PROFILE"
+          if [ "$PROFILE" = "full" ]; then
+            cp configs/an7583.config .config
+            sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
+            echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y' >> .config
+            if [ -f configs/an7581-tyfza1-packages.config ]; then
+              grep '^CONFIG_PACKAGE_' configs/an7581-tyfza1-packages.config >> .config || true
+            fi
+          else
+            # 最小验证版：只保留 target + 设备 + LuCI + 必备驱动（驱动在 an7583.mk 的 DEVICE_PACKAGES 里）
+            cat > .config <<'EOF'
+          CONFIG_TARGET_airoha=y
+          CONFIG_TARGET_airoha_an7583=y
+          CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_htop=y
+          EOF
+            sed -i 's/^ *//' .config
           fi
           make defconfig
           echo "--- device selection ---"
           grep -E '^CONFIG_TARGET_DEVICE_airoha' .config | grep '=y' || {
             echo "设备未被选中，请检查 an7583.mk 里的设备名"; exit 1; }
+          echo "--- package count ---"
+          grep -c '^CONFIG_PACKAGE_.*=y' .config || true
 
       - name: Download sources
         run: make download -j8 || true
@@ -77,8 +105,9 @@ jobs:
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4
+        if: always()
         with:
-          name: hg5380a-firmware
+          name: hg5380a-${{ inputs.profile || 'minimal' }}
           if-no-files-found: warn
           path: |
             bin/targets/airoha/an7583/*sysupgrade*
