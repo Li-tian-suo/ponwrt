@@ -109,6 +109,29 @@ jobs:
       - name: Compile
         run: make -j$(nproc) || (make -j1 V=s 2>&1 | tail -n 300; false)
 
+      - name: Assemble U-Boot FIP (best effort)
+        continue-on-error: true
+        run: |
+          # 仓库 tools/ 里没有 fiptool，用 TF-A 自带的构建
+          if [ ! -x staging_dir/host/bin/fiptool ]; then
+            git clone --depth 1 https://github.com/ARM-software/arm-trusted-firmware /tmp/atf
+            make -C /tmp/atf/tools/fiptool -j"$(nproc)" || true
+            sudo cp /tmp/atf/tools/fiptool/fiptool staging_dir/host/bin/fiptool || true
+          fi
+          ls -l staging_dir/host/bin/fiptool || true
+          IMG="staging_dir/target-aarch64_cortex-a53_musl/image"
+          ls -l "$IMG" | head -30 || true
+          if [ -f "$IMG/an7583-bl2.bin" ]; then
+            staging_dir/host/bin/fiptool create --tb-fw "$IMG/an7583-bl2.bin" \
+              "$IMG/an7583_hg5380a-bl2.fip" && cp "$IMG/an7583_hg5380a-bl2.fip" bin/targets/airoha/an7583/preloader.bin
+          fi
+          if [ -f "$IMG/an7583-bl31.lzma" ] && [ -f "$IMG/an7583_hg5380a-u-boot.lzma" ]; then
+            staging_dir/host/bin/fiptool create --soc-fw "$IMG/an7583-bl31.lzma" \
+              --nt-fw "$IMG/an7583_hg5380a-u-boot.lzma" "$IMG/an7583_hg5380a-bl31-u-boot.fip" && \
+              cp "$IMG/an7583_hg5380a-bl31-u-boot.fip" bin/targets/airoha/an7583/bl31-uboot.fip
+          fi
+          ls -l bin/targets/airoha/an7583/ || true
+
       - name: List artifacts
         if: always()
         run: find bin/targets/airoha/an7583 -maxdepth 1 -type f -printf '%f  %s\n' 2>/dev/null || true

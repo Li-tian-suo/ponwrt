@@ -1,4 +1,9 @@
 # 追加到 ponwrt 的 target/linux/airoha/image/an7583.mk 末尾
+#
+# 注意：这里不声明 ARTIFACT/preloader.bin 与 ARTIFACT/bl31-uboot.fip。
+# 本仓库 tools/ 里没有 fiptool，直接声明会让 target/linux 的 install 阶段
+# 报 “staging_dir/host/bin/fiptool: No such file or directory”（Error 127）。
+# U-Boot/FIP 由 workflow 里的独立步骤用 TF-A 的 fiptool 组装，见 build-hg5380a.yml。
 
 define Device/fiberhome_hg5380a
 	$(call Device/FitImageLzma)
@@ -14,8 +19,5 @@ define Device/fiberhome_hg5380a
 	IMAGES := sysupgrade.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
 		pad-rootfs | append-metadata
-	ARTIFACT/preloader.bin := an7583-preloader hg5380a
-	ARTIFACT/bl31-uboot.fip := an7583-bl31-uboot hg5380a
-	ARTIFACTS := preloader.bin bl31-uboot.fip
 endef
 TARGET_DEVICES += fiberhome_hg5380a
