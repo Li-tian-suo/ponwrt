@@ -97,6 +97,7 @@ jobs:
           CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_air-en8811h-firmware=y
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_htop=y
           CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
@@ -117,6 +118,7 @@ jobs:
           CONFIG_PACKAGE_airoha-ponctl=y
           CONFIG_PACKAGE_airoha-pond=y
           CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_air-en8811h-firmware=y
           EOF
           sed -i 's/^ *//' .config
           make defconfig
