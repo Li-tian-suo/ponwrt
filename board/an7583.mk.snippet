@@ -6,7 +6,11 @@
 # U-Boot/FIP 由 workflow 里的独立步骤用 TF-A 的 fiptool 组装，见 build-hg5380a.yml。
 
 define Device/fiberhome_hg5380a
-	$(call Device/FitImageLzma)
+	# 原厂 U-Boot 2023.04 的 LZMA 解码器解不了 OpenWrt 产出的 lp=2 数据流
+	# （uncompress error 7），改用 gzip，兼容性最好。
+	KERNEL_SUFFIX := -uImage.itb
+	KERNEL = kernel-bin | gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
+	KERNEL_NAME := Image
 	DEVICE_VENDOR := FiberHome
 	DEVICE_MODEL := HG5380A
 	DEVICE_DTS := an7583-fiberhome-hg5380a
