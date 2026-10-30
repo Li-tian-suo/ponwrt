@@ -31,6 +31,14 @@ jobs:
             grep -q "^${sym}=" "$KCONF" || echo "${sym}=y" >> "$KCONF"
           done
 
+      - name: Provide libffi
+        run: |
+          # immortalwrt/packages has no libs/libffi, but python3 and ruby depend on it.
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
+          git -C /tmp/owrt sparse-checkout set package/libs/libffi
+          mkdir -p package/libs
+          cp -a /tmp/owrt/package/libs/libffi package/libs/
+
       - name: Update feeds
         run: ./scripts/feeds update -a
 
