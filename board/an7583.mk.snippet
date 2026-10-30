@@ -14,7 +14,6 @@ define Device/fiberhome_hg5380a
 	PAGESIZE := 2048
 	KERNEL_SIZE := 6144k
 	DEVICE_PACKAGES := kmod-phy-airoha-en8811h \
-		kmod-mt7915e kmod-mt7916-firmware \
 		kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond
 	IMAGES := sysupgrade.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \

@@ -1,4 +1,4 @@
-name: Build HG5380A (AN7583 FiberHome)
+﻿name: Build HG5380A (AN7583 FiberHome)
 
 # 适配 Li-tian-suo/ponwrt（pbs05/ponwrt 的 fork）
 # 前置：仓库里需要有 board/ 目录（本包提供的两个文件）
@@ -99,8 +99,6 @@ jobs:
           CONFIG_PACKAGE_luci-app-pon=y
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_htop=y
-          CONFIG_PACKAGE_kmod-mt7915e=y
-          CONFIG_PACKAGE_kmod-mt7916-firmware=y
           CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
           CONFIG_PACKAGE_kmod-airoha-en7572=y
           CONFIG_PACKAGE_kmod-airoha-xpon=y
@@ -113,8 +111,6 @@ jobs:
           fi
           # 两个档位都要的板级驱动与 PON 组件（设备级 DEVICE_PACKAGES 在本仓库不生效，显式加）
           cat >> .config <<'EOF'
-          CONFIG_PACKAGE_kmod-mt7915e=y
-          CONFIG_PACKAGE_kmod-mt7916-firmware=y
           CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
           CONFIG_PACKAGE_kmod-airoha-en7572=y
           CONFIG_PACKAGE_kmod-airoha-xpon=y
