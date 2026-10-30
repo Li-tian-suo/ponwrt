@@ -44,6 +44,16 @@ jobs:
           fi
           grep -n "fiberhome_hg5380a" target/linux/airoha/image/an7583.mk | head
 
+      - name: Trim feeds (minimal)
+        env:
+          PROFILE: ${{ inputs.profile || 'minimal' }}
+        run: |
+          # openwrt/video 里的 qt5 有 Kconfig 递归依赖，最小版不需要它
+          if [ "$PROFILE" = "minimal" ]; then
+            sed -i '/^src-git video /d' feeds.conf.default
+          fi
+          cat feeds.conf.default
+
       - name: Update feeds
         run: ./scripts/feeds update -a
 
