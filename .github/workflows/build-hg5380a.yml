@@ -96,8 +96,16 @@ jobs:
           CONFIG_PACKAGE_luci-mod-system=y
           CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-pon=y
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_kmod-mt7915e=y
+          CONFIG_PACKAGE_kmod-mt7916-firmware=y
+          CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-en7572=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
           # CONFIG_PACKAGE_luci-app-fwknopd is not set
           # CONFIG_PACKAGE_squeezelite-custom is not set
           EOF
@@ -121,9 +129,12 @@ jobs:
         run: |
           # 仓库 tools/ 里没有 fiptool，用 TF-A 自带的构建
           if [ ! -x staging_dir/host/bin/fiptool ]; then
-            git clone --depth 1 https://github.com/ARM-software/arm-trusted-firmware /tmp/atf
-            make -C /tmp/atf/tools/fiptool -j"$(nproc)" || true
-            sudo cp /tmp/atf/tools/fiptool/fiptool staging_dir/host/bin/fiptool || true
+            git clone --depth 1 https://github.com/ARM-software/arm-trusted-firmware /tmp/atf || true
+            # 必须在 TF-A 根目录跑，并给出可写的 BUILD_DIR，否则会尝试 mkdir /tools
+            make -C /tmp/atf/tools/fiptool BUILD_DIR=/tmp/atf/build -j"$(nproc)" || true
+            FIP=$(find /tmp/atf -type f -name fiptool -perm -u+x 2>/dev/null | head -1)
+            echo "found fiptool: ${FIP:-none}"
+            [ -n "$FIP" ] && cp "$FIP" staging_dir/host/bin/fiptool || true
           fi
           ls -l staging_dir/host/bin/fiptool || true
           IMG="staging_dir/target-aarch64_cortex-a53_musl/image"
