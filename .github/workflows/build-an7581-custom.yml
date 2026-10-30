@@ -1,0 +1,115 @@
+name: Build AN7581 custom (TYFZA1 package set)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget
+
+      - name: Patch kernel config
+        run: |
+          KCONF="target/linux/airoha/an7581/config-6.18"
+          touch "$KCONF"
+          for sym in \
+            CONFIG_USB_NET_RNDIS_HOST CONFIG_USB_NET_CDCETHER CONFIG_USB_NET_CDC_NCM \
+            CONFIG_USB_NET_CDC_MBIM CONFIG_USB_NET_QMI_WWAN CONFIG_USB_SERIAL_OPTION \
+            CONFIG_USB_WDM CONFIG_USB_ACM CONFIG_USB_STORAGE CONFIG_SCSI CONFIG_BLK_DEV_SD \
+            CONFIG_EXFAT_FS CONFIG_NTFS3_FS CONFIG_F2FS_FS CONFIG_FUSE_FS \
+            CONFIG_TUN CONFIG_NETFILTER_XT_TARGET_TPROXY; do
+            grep -q "^${sym}=" "$KCONF" || echo "${sym}=y" >> "$KCONF"
+          done
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Vendor small LuCI apps
+        run: |
+          set -e
+          fetch() {
+            name="$1"; url="$2"; sha="$3"; sub="$4"
+            curl -fsSL --retry 3 -o "/tmp/$name.tar.gz" "$url"
+            echo "$sha  /tmp/$name.tar.gz" | sha256sum -c -
+            rm -rf "/tmp/$name"; mkdir -p "/tmp/$name"
+            tar -xzf "/tmp/$name.tar.gz" -C "/tmp/$name"
+            top=$(find "/tmp/$name" -mindepth 1 -maxdepth 1 -type d | head -n1)
+            if [ -n "$sub" ]; then src="$top/$sub"; else src="$top"; fi
+            rm -rf "package/$name"
+            cp -a "$src" "package/$name"
+          }
+          fetch luci-app-systools \
+            https://codeload.github.com/luanmuc/luci-app-systools/tar.gz/52dcfa4be02aa9b451354769854b38f3bc9c5393 \
+            edd495c7962515be589ccdeb36ee5760f7bf5360026666a89b96605be5c97c68 ""
+          fetch luci-app-timedreboot \
+            https://codeload.github.com/kongfl888/luci-app-timedreboot/tar.gz/fce776bc33a838a14c7a2c6098ef4cdc7606a8b2 \
+            8447d54c1967c1b955eaf584c533417d9080196585dceccc0220df534bce15f4 ""
+          fetch luci-app-poweroffdevice \
+            https://codeload.github.com/sirpdboy/luci-app-poweroffdevice/tar.gz/8f53359c3234c7c398b846b5425f9b0b017c03ec \
+            c13ee22e1006c8ef7f2cc14b339c5e0e943947e6e2eafe7513bfb726abe7c162 luci-app-poweroffdevice
+
+      - name: Configure
+        run: |
+          cp configs/an7581.config .config
+          cat configs/an7581-tyfza1-packages.config >> .config
+          make defconfig
+          sed -i 's/192.168.[0-9]*.1/192.168.1.1/g' package/base-files/files/bin/config_generate
+          mkdir -p files/etc/uci-defaults
+          {
+            echo '#!/bin/sh'
+            echo "uci set system.@system[0].timezone='CST-8'"
+            echo "uci set system.@system[0].zonename='Asia/Shanghai'"
+            echo "uci set luci.main.mediaurlbase='/luci-static/argon'"
+            echo 'for r in radio0 radio1; do'
+            echo "  uci set wireless.\$r.country='CN'"
+            echo "  uci set wireless.\$r.disabled='0'"
+            echo 'done'
+            echo 'for i in default_radio0 default_radio1; do'
+            echo "  uci set wireless.\$i.ssid='ponwrt'"
+            echo "  uci set wireless.\$i.encryption='none'"
+            echo "  uci set wireless.\$i.disabled='0'"
+            echo "  uci -q delete wireless.\$i.key"
+            echo 'done'
+            echo 'board=$(cat /tmp/sysinfo/board_name 2>/dev/null)'
+            echo 'case "$board" in'
+            echo "  *hg5585f*) uci set wireless.radio0.txpower='30'; uci set wireless.radio1.txpower='30';;"
+            echo 'esac'
+            echo 'uci commit system'
+            echo 'uci commit luci'
+            echo 'uci commit wireless'
+            echo 'exit 0'
+          } > files/etc/uci-defaults/99-ponwrt-defaults
+          chmod +x files/etc/uci-defaults/99-ponwrt-defaults
+          echo "--- device selection ---"
+          grep -E '^CONFIG_TARGET_DEVICE_airoha' .config | grep '=y' || true
+          echo "--- key packages ---"
+          for p in luci-app-openclash kmod-usb-net-rndis kmod-fs-ntfs3 kmod-fs-exfat \
+                   ttyd luci-app-ttyd luci-app-filemanager iperf3 luci-app-systools \
+                   luci-app-timedreboot luci-app-poweroffdevice; do
+            grep -q "^CONFIG_PACKAGE_$p=y" .config && echo "OK $p" || echo "MISSING $p"
+          done
+
+      - name: Download sources
+        run: make download -j8 || true
+
+      - name: Compile
+        run: make -j$(nproc) || (make -j1 V=s 2>&1 | tail -n 300; false)
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        with:
+          name: an7581-custom
+          path: bin/targets/airoha/an7581/
