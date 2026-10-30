@@ -39,6 +39,14 @@ jobs:
       - name: Update feeds
         run: ./scripts/feeds update -a
 
+      - name: Provide libffi
+        run: |
+          # immortalwrt/packages 缺 libs/libffi，python3 会因 ffi.h 缺失编译失败
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
+          git -C /tmp/owrt sparse-checkout set package/libs/libffi
+          mkdir -p package/libs
+          cp -a /tmp/owrt/package/libs/libffi package/libs/
+
       - name: Install feeds
         run: ./scripts/feeds install -a
 
