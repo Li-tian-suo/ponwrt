@@ -93,6 +93,9 @@ jobs:
           CONFIG_PACKAGE_luci-mod-system=y
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_htop=y
+          # feeds 里的 Kconfig 死循环，必须显式关掉才能过 defconfig
+          # CONFIG_PACKAGE_luci-app-fwknopd is not set
+          # CONFIG_PACKAGE_squeezelite-custom is not set
           EOF
             sed -i 's/^ *//' .config
           fi
