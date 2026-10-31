@@ -20,9 +20,11 @@ define Build/Compile
 endef
 
 define Package/air-en8811h-firmware/install
-	$(INSTALL_DIR) $(1)/lib/firmware
-	$(INSTALL_DATA) ./files/EthMD32.DSP.bin $(1)/lib/firmware/
-	$(INSTALL_DATA) ./files/EthMD32.dm.bin $(1)/lib/firmware/
+	# The driver requests "airoha/EthMD32.*.bin", so the files must live in
+	# /lib/firmware/airoha/ - not directly in /lib/firmware/.
+	$(INSTALL_DIR) $(1)/lib/firmware/airoha
+	$(INSTALL_DATA) ./files/EthMD32.DSP.bin $(1)/lib/firmware/airoha/
+	$(INSTALL_DATA) ./files/EthMD32.dm.bin $(1)/lib/firmware/airoha/
 endef
 
 $(eval $(call BuildPackage,air-en8811h-firmware))

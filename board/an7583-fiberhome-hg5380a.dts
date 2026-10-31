@@ -175,9 +175,19 @@
 };
 
 &mdio_0 {
-	/* Airoha EN8811H 2.5G PHY */
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio0_pins>;
+
+	/*
+	 * Airoha EN8811H 2.5G PHY.
+	 *
+	 * 不要写 compatible = "ethernet-phy-id03a2.a411"：那会把该节点当成
+	 * C22 器件，MMD 访问退化为寄存器 13/14 的间接访问，而 EN8811H 是
+	 * C45-only（驱动里明确写了 MDIO_DEVS1/2 为空），间接访问写不进固件，
+	 * 表现为 "MCU not ready: 0x0" + "Load firmware failed: -19"。
+	 * 官方 an7583-evb-emmc.dts 也是只靠 reg 探测，由 PHY ID 匹配驱动。
+	 */
 	en8811: ethernet-phy@f {
-		compatible = "ethernet-phy-id03a2.a411";
 		reg = <0xf>;
 		reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
 		reset-assert-us = <10000>;
