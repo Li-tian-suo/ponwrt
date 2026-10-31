@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: GPL-2.0-only OR MIT
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
  * FiberHome HG5380A — Airoha AN7583
  *
@@ -179,7 +179,7 @@
 	en8811: ethernet-phy@f {
 		compatible = "ethernet-phy-id03a2.a411";
 		reg = <0xf>;
-		reset-gpios = <&an7583_pinctrl 34 GPIO_ACTIVE_LOW>;
+		reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
 		reset-assert-us = <10000>;
 		reset-deassert-us = <20000>;
 	};
