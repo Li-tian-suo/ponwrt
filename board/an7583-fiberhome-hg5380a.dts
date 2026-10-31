@@ -208,8 +208,19 @@
 
 &switch {
 	status = "okay";
-	pinctrl-names = "default";
-	pinctrl-0 = <&mdio0_pins>;
+	/*
+	 * 这里不要写 pinctrl-0 = <&mdio0_pins>。
+	 *
+	 * mdio0_pins 归 mdio_0 节点所有（官方 an7583-evb-emmc.dts 就是这么放的）。
+	 * 如果 switch 也申请同一个 pin group，第二个请求会被拒绝：
+	 *
+	 *   pinctrl: pin mdc_0 already requested by ...mdio-bus@c8;
+	 *            cannot claim for ...switch
+	 *   error -EINVAL: could not request pin 53 (mdc_0)
+	 *   mt7530-mmio ...switch: Error applying setting, reverse things back
+	 *
+	 * switch 探测失败 → 内部 GSW 端口全没了 → EN8811H 也不会被探测到。
+	 */
 };
 
 &gsw_port2 {
