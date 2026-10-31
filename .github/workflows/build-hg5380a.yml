@@ -1,8 +1,11 @@
-﻿name: Build HG5380A (AN7583 FiberHome)
+name: Build HG5380A (AN7583 FiberHome)
 
 # 适配 Li-tian-suo/ponwrt（pbs05/ponwrt 的 fork）
 # 前置：仓库里需要有 board/ 目录（本包提供的两个文件）
 on:
+  push:
+    branches:
+      - master
   workflow_dispatch:
     inputs:
       profile:
