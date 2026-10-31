@@ -232,10 +232,19 @@
 	status = "okay";
 };
 
-/* AN7583 的 NPU 在 OpenWrt 下未启用（与 Nokia/EVB 参考板一致），
- * 启用会在 probe 阶段触发看门狗复位 */
+/*
+ * AN7583 NPU（硬件转发加速）。
+ *
+ * 上游 6.18 已有 airoha,an7583-npu 支持（Patch 102-03，固件
+ * airoha/an7583_npu_{rv32,data}.bin），并且 926 补丁把 mailbox 等待
+ * 从 100 s 收紧到 100 ms。早期没有 926 时，mailbox 无回复会让
+ * bottom halves 关闭空转 100 s，触发看门狗，表现为“probe 阶段静默复位”。
+ *
+ * 现在启用：若 NPU 无法启动，probe 会快速返回 -ETIMEDOUT 而不是挂死，
+ * 以太网仍可回退到无加速模式。固件缺失时 probe 失败同样不影响启动。
+ */
 &npu {
-	status = "disabled";
+	status = "okay";
 };
 
 &pon_pcs {
