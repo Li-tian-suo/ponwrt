@@ -265,18 +265,20 @@
 };
 
 /*
- * AN7583 NPU（硬件转发加速）。
+ * AN7583 NPU（硬件转发加速）—— 暂时关闭。
  *
- * 上游 6.18 已有 airoha,an7583-npu 支持（Patch 102-03，固件
- * airoha/an7583_npu_{rv32,data}.bin），并且 926 补丁把 mailbox 等待
- * 从 100 s 收紧到 100 ms。早期没有 926 时，mailbox 无回复会让
- * bottom halves 关闭空转 100 s，触发看门狗，表现为“probe 阶段静默复位”。
+ * 上机实测：status = "okay" 时内核日志停在
  *
- * 现在启用：若 NPU 无法启动，probe 会快速返回 -ETIMEDOUT 而不是挂死，
- * 以太网仍可回退到无加速模式。固件缺失时 probe 失败同样不影响启动。
+ *   [    1.793156] airoha-npu 1e900000.npu: NOTICE:  Get secure key in flash
+ *
+ * 之后再无任何输出，看门狗复位，系统起不来。这是 NPU 驱动在从 flash 读
+ * secure key 之后挂死，与以太网/PHY 无关。
+ *
+ * 对比历史版本也印证这一点：run17（NPU 关闭）能进用户态，run20（NPU 打开）
+ * 从未引导成功。等 LAN/PON 验证完再单独调 NPU，不要让它挡住主线。
  */
 &npu {
-	status = "okay";
+	status = "disabled";
 };
 
 &pon_pcs {
