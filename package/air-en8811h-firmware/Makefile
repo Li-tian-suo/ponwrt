@@ -1,4 +1,4 @@
-﻿include $(TOPDIR)/rules.mk
+include $(TOPDIR)/rules.mk
 
 PKG_NAME:=air-en8811h-firmware
 PKG_RELEASE:=1
@@ -6,11 +6,17 @@ PKG_LICENSE:=Proprietary
 
 include $(INCLUDE_DIR)/package.mk
 
+define Build/Compile
+endef
+
 define Package/air-en8811h-firmware
   SECTION:=firmware
   CATEGORY:=Firmware
   TITLE:=Airoha EN8811H 2.5G PHY firmware
   DEPENDS:=+kmod-phy-airoha-en8811h
+endef
+
+define Build/Compile
 endef
 
 define Package/air-en8811h-firmware/install
