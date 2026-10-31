@@ -179,15 +179,26 @@
 	pinctrl-0 = <&mdio0_pins>;
 
 	/*
-	 * Airoha EN8811H 2.5G PHY.
+	 * Airoha EN8811H 2.5G PHY —— 这是一颗 Clause 45 (C45) PHY。
 	 *
-	 * 不要写 compatible = "ethernet-phy-id03a2.a411"：那会把该节点当成
-	 * C22 器件，MMD 访问退化为寄存器 13/14 的间接访问，而 EN8811H 是
-	 * C45-only（驱动里明确写了 MDIO_DEVS1/2 为空），间接访问写不进固件，
-	 * 表现为 "MCU not ready: 0x0" + "Load firmware failed: -19"。
-	 * 官方 an7583-evb-emmc.dts 也是只靠 reg 探测，由 PHY ID 匹配驱动。
+	 * 必须显式声明 "ethernet-phy-ieee802.3-c45"，内核才会走
+	 * get_phy_c45_ids() 直接读 MMD 寄存器，驱动对 PBUS/固件寄存器的访问
+	 * 才成立。
+	 *
+	 * 曾经的写法 compatible = "ethernet-phy-id03a2.a411" 是错的：
+	 * fwnode_mdiobus_register_phy() 里 fwnode_get_phy_id() 一旦解析成功，
+	 * 就走
+	 *     phy_device_create(bus, addr, phy_id, 0, NULL);
+	 * 这个分支，is_c45 被硬编码为 0，所有 MMD 访问退化成 C22 间接窗口
+	 * （寄存器 13/14）。EN8811H 的 MDIO_DEVS1/2 为空、只能直连 C45，于是
+	 * 固件写不进 PBUS，表现为
+	 *     MCU not ready: 0x0 / Load firmware failed: -19
+	 *
+	 * 参照 LEDE 中同为烽火设备的 HG5382A（2.5G LAN 用 GPY211）写法：
+	 *     compatible = "maxlinear,gpy211", "ethernet-phy-ieee802.3-c45";
 	 */
 	en8811: ethernet-phy@f {
+		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <0xf>;
 		reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
 		reset-assert-us = <10000>;
