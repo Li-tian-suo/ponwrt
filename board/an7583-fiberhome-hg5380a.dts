@@ -216,19 +216,17 @@
 		reg = <0xf>;
 
 		/*
-		 * 复位时序照抄官方 an7583-evb-emmc.dts，它的注释写着
-		 * "Hold reset for 1 second and wait 100 ms before probing
-		 *  EN8811H"，对应：
-		 *     reset-assert-us = <1000000>;
-		 *     reset-deassert-us = <100000>;
+		 * 复位脚与复位时序完全照抄 Nokia XG-040G-MF
+		 * （an7583-nokia_xg-040g-mf-common.dtsi）—— 同为 AN7583 + EN8811H
+		 * 的量产设备，是这颗 PHY 在本 SoC 上最可信的参考。
 		 *
-		 * Nokia 的 XG-040G-MF 用的是 10ms/20ms，两者都能在各自板上工作，
-		 * 但本板实测 10ms/20ms 下 MD32 固件加载完成后 MCU 始终不就绪
-		 * （FW_STATUS 读回 0x0），所以先试 EVB 的长复位。
+		 * 官方 EVB 用的是 GPIO28 + 1s/100ms，本板实测无效（PHY 完全
+		 * 不响应 MDIO）；改用 GPIO34 后 MDIO 访问立刻正常，说明复位脚
+		 * 就是这一根。
 		 */
 		reset-gpios = <&an7583_pinctrl 34 GPIO_ACTIVE_LOW>;
-		reset-assert-us = <1000000>;
-		reset-deassert-us = <100000>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <20000>;
 	};
 };
 
