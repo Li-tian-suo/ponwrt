@@ -24,15 +24,15 @@
 +{
 +	int ret;
 +
-+	ret = phy_write(phydev, AIR_MMD_CTRL_REG, devad);
++	ret = __phy_write(phydev, AIR_MMD_CTRL_REG, devad);
 +	if (ret < 0)
 +		return ret;
 +
-+	ret = phy_write(phydev, AIR_MMD_DATA_REG, regnum);
++	ret = __phy_write(phydev, AIR_MMD_DATA_REG, regnum);
 +	if (ret < 0)
 +		return ret;
 +
-+	return phy_write(phydev, AIR_MMD_CTRL_REG, AIR_MMD_ADDR_MODE | devad);
++	return __phy_write(phydev, AIR_MMD_CTRL_REG, AIR_MMD_ADDR_MODE | devad);
 +}
 +
 +static int en8811h_read_mmd(struct phy_device *phydev, int devad, u16 regnum)
@@ -43,7 +43,7 @@
 +	if (ret < 0)
 +		return ret;
 +
-+	return phy_read(phydev, AIR_MMD_DATA_REG);
++	return __phy_read(phydev, AIR_MMD_DATA_REG);
 +}
 +
 +static int en8811h_write_mmd(struct phy_device *phydev, int devad, u16 regnum,
@@ -55,7 +55,7 @@
 +	if (ret < 0)
 +		return ret;
 +
-+	return phy_write(phydev, AIR_MMD_DATA_REG, val);
++	return __phy_write(phydev, AIR_MMD_DATA_REG, val);
 +}
 +
  static struct phy_driver en8811h_driver[] = {
