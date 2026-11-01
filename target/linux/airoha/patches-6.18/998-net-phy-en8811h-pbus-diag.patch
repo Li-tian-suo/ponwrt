@@ -1,0 +1,41 @@
+--- a/drivers/net/phy/air_en8811h.c	2026-11-01 17:21:28.616038800 +0800
++++ b/drivers/net/phy/air_en8811h.c	2026-11-01 17:21:28.621741900 +0800
+@@ -486,6 +486,14 @@
+ 	if (ret < 0)
+ 		goto en8811h_load_firmware_out;
+ 
++	{
++		u32 v = 0;
++
++		air_buckpbus_reg_read(phydev, EN8811H_FW_CTRL_2, &v);
++		phydev_err(phydev, "diag: CTRL2 after LOADING=0x%08x (bit11=%d)\n",
++			   v, !!(v & EN8811H_FW_CTRL_2_LOADING));
++	}
++
+ 	ret = air_write_buf(phydev, AIR_FW_ADDR_DM,  fw1);
+ 	if (ret < 0)
+ 		goto en8811h_load_firmware_out;
+@@ -504,6 +512,23 @@
+ 	if (ret < 0)
+ 		goto en8811h_load_firmware_out;
+ 
++	{
++		u32 c1 = 0, c2 = 0, ver = 0, trap = 0, cgm = 0, pol = 0;
++		int pg = phy_read(phydev, AIR_EXT_PAGE_ACCESS);
++
++		air_buckpbus_reg_read(phydev, EN8811H_FW_CTRL_1, &c1);
++		air_buckpbus_reg_read(phydev, EN8811H_FW_CTRL_2, &c2);
++		air_buckpbus_reg_read(phydev, EN8811H_FW_VERSION, &ver);
++		/* 有确定值的寄存器，用来判断 PBUS 到底通不通 */
++		air_buckpbus_reg_read(phydev, EN8811H_HWTRAP1, &trap);
++		air_buckpbus_reg_read(phydev, EN8811H_CLK_CGM, &cgm);
++		air_buckpbus_reg_read(phydev, EN8811H_POLARITY, &pol);
++
++		phydev_err(phydev,
++			   "diag: page=0x%x CTRL1=0x%08x CTRL2=0x%08x VER=0x%08x HWTRAP1=0x%08x CGM=0x%08x POL=0x%08x\n",
++			   pg, c1, c2, ver, trap, cgm, pol);
++	}
++
+ 	ret = en8811h_wait_mcu_ready(phydev);
+ 
+ 	air_buckpbus_reg_read(phydev, EN8811H_FW_VERSION,
