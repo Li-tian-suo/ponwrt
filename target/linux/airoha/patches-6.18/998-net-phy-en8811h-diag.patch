@@ -1,0 +1,176 @@
+--- a/drivers/net/phy/air_en8811h.c	2026-11-01 16:51:51.079469547 +0800
++++ b/drivers/net/phy/air_en8811h.c	2026-11-01 16:51:51.085730248 +0800
+@@ -24,6 +24,12 @@
+ #define EN8811H_MD32_DM		"airoha/EthMD32.dm.bin"
+ #define EN8811H_MD32_DSP	"airoha/EthMD32.DSP.bin"
+ 
++/* Defined at the bottom of this file. */
++static int __air_mmd_read_on_page(struct phy_device *phydev, int page,
++				  int devad, u16 regnum);
++static int air_mmd_read(struct phy_device *phydev, int devad, u16 regnum);
++
++
+ #define AIR_FW_ADDR_DM	0x00000000
+ #define AIR_FW_ADDR_DSP	0x00100000
+ 
+@@ -445,19 +451,31 @@
+ 
+ static int en8811h_wait_mcu_ready(struct phy_device *phydev)
+ {
+-	int ret, reg_value;
++	int i, val = -1, last = -2;
+ 
+-	/* Because of mdio-lock, may have to wait for multiple loads */
+-	ret = phy_read_mmd_poll_timeout(phydev, MDIO_MMD_VEND1,
+-					EN8811H_PHY_FW_STATUS, reg_value,
+-					reg_value == EN8811H_PHY_READY,
+-					20000, 7500000, true);
+-	if (ret) {
+-		phydev_err(phydev, "MCU not ready: 0x%x\n", reg_value);
+-		return -ENODEV;
++	/*
++	 * Poll by hand instead of going through phy_read_mmd(): the generic
++	 * helper ends up on the broken C22 path, while the direct 13/14
++	 * helper demonstrably works (verified with a scan build).
++	 *
++	 * 7.5 s total in 20 ms steps, logging any change of the status
++	 * register so the boot log shows whether the MCU ever leaves 0.
++	 */
++	for (i = 0; i < 375; i++) {
++		val = air_mmd_read(phydev, MDIO_MMD_VEND1,
++				   EN8811H_PHY_FW_STATUS);
++		if (val != last) {
++			phydev_err(phydev, "FW_STATUS[%dms] = 0x%x\n",
++				   i * 20, val);
++			last = val;
++		}
++		if (val == EN8811H_PHY_READY)
++			return 0;
++		msleep(20);
+ 	}
+ 
+-	return 0;
++	phydev_err(phydev, "MCU not ready: 0x%x (after 7.5 s)\n", val);
++	return -ENODEV;
+ }
+ 
+ static int en8811h_load_firmware(struct phy_device *phydev)
+@@ -504,6 +522,17 @@
+ 	if (ret < 0)
+ 		goto en8811h_load_firmware_out;
+ 
++	{
++		u32 c1 = 0, c2 = 0, ver = 0;
++
++		air_buckpbus_reg_read(phydev, EN8811H_FW_CTRL_1, &c1);
++		air_buckpbus_reg_read(phydev, EN8811H_FW_CTRL_2, &c2);
++		air_buckpbus_reg_read(phydev, EN8811H_FW_VERSION, &ver);
++		phydev_err(phydev,
++			   "fw diag: dm=%zu dsp=%zu CTRL1=0x%08x CTRL2=0x%08x VER=0x%08x\n",
++			   fw1->size, fw2->size, c1, c2, ver);
++	}
++
+ 	ret = en8811h_wait_mcu_ready(phydev);
+ 
+ 	air_buckpbus_reg_read(phydev, EN8811H_FW_VERSION,
+@@ -1184,6 +1213,91 @@
+ 	return genphy_suspend(phydev);
+ }
+ 
++/*
++ * EN8811H MMD access.
++ *
++ * Neither core path works on this chip: with is_c45 == 0 the composite
++ * address is handed straight to bus->read()/bus->write() and mdio-airoha
++ * packs it into the five bit AN7583_MII_CL22_REG_ADDR field (BUSY never
++ * clears, -ETIMEDOUT); with is_c45 == 1 the controller sends real C45
++ * frames that the PHY does not answer.
++ *
++ * Walk 0x0d/0x0e by hand like the vendor module does. On this board the
++ * standard page answers first, so probe it before the extended page 4.
++ */
++#define AIR_MMD_CTRL_REG	0x0d
++#define AIR_MMD_DATA_REG	0x0e
++#define AIR_MMD_ADDR_MODE	0x4000
++
++static int __air_mmd_read_on_page(struct phy_device *phydev, int page,
++				  int devad, u16 regnum)
++{
++	int ret;
++
++	ret = __phy_write(phydev, AIR_EXT_PAGE_ACCESS, page);
++	if (ret < 0)
++		return ret;
++	ret = __phy_write(phydev, AIR_MMD_CTRL_REG, devad);
++	if (ret < 0)
++		goto out;
++	ret = __phy_write(phydev, AIR_MMD_DATA_REG, regnum);
++	if (ret < 0)
++		goto out;
++	ret = __phy_write(phydev, AIR_MMD_CTRL_REG, AIR_MMD_ADDR_MODE | devad);
++	if (ret < 0)
++		goto out;
++
++	ret = __phy_read(phydev, AIR_MMD_DATA_REG);
++
++out:
++	__phy_write(phydev, AIR_EXT_PAGE_ACCESS, AIR_PHY_PAGE_STANDARD);
++	return ret;
++}
++
++static int air_mmd_read(struct phy_device *phydev, int devad, u16 regnum)
++{
++	int ret;
++
++	ret = __air_mmd_read_on_page(phydev, AIR_PHY_PAGE_STANDARD, devad, regnum);
++	if (ret >= 0)
++		return ret;
++
++	return __air_mmd_read_on_page(phydev, AIR_PHY_PAGE_EXTENDED_4, devad, regnum);
++}
++
++static int en8811h_read_mmd(struct phy_device *phydev, int devad, u16 regnum)
++{
++	return air_mmd_read(phydev, devad, regnum);
++}
++
++static int en8811h_write_mmd(struct phy_device *phydev, int devad, u16 regnum,
++			     u16 val)
++{
++	int ret, page;
++
++	for (page = AIR_PHY_PAGE_STANDARD; ; page = AIR_PHY_PAGE_EXTENDED_4) {
++		ret = __phy_write(phydev, AIR_EXT_PAGE_ACCESS, page);
++		if (ret < 0)
++			return ret;
++		ret = __phy_write(phydev, AIR_MMD_CTRL_REG, devad);
++		if (ret < 0)
++			goto next;
++		ret = __phy_write(phydev, AIR_MMD_DATA_REG, regnum);
++		if (ret < 0)
++			goto next;
++		ret = __phy_write(phydev, AIR_MMD_CTRL_REG,
++				  AIR_MMD_ADDR_MODE | devad);
++		if (ret < 0)
++			goto next;
++		ret = __phy_write(phydev, AIR_MMD_DATA_REG, val);
++
++next:
++		__phy_write(phydev, AIR_EXT_PAGE_ACCESS, AIR_PHY_PAGE_STANDARD);
++		if (ret >= 0 || page == AIR_PHY_PAGE_EXTENDED_4)
++			return ret;
++	}
++}
++
+ static struct phy_driver en8811h_driver[] = {
+ {
+ 	PHY_ID_MATCH_MODEL(EN8811H_PHY_ID),
+@@ -1201,6 +1315,8 @@
+ 	.led_hw_is_supported	= en8811h_led_hw_is_supported,
+ 	.read_page		= air_phy_read_page,
+ 	.write_page		= air_phy_write_page,
++	.read_mmd		= en8811h_read_mmd,
++	.write_mmd		= en8811h_write_mmd,
+ 	.led_blink_set		= air_led_blink_set,
+ 	.led_brightness_set	= air_led_brightness_set,
+ 	.led_hw_control_set	= air_led_hw_control_set,

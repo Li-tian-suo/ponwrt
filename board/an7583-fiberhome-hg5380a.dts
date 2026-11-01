@@ -215,9 +215,20 @@
 		compatible = "ethernet-phy-id03a2.a411";
 		reg = <0xf>;
 
+		/*
+		 * 复位时序照抄官方 an7583-evb-emmc.dts，它的注释写着
+		 * "Hold reset for 1 second and wait 100 ms before probing
+		 *  EN8811H"，对应：
+		 *     reset-assert-us = <1000000>;
+		 *     reset-deassert-us = <100000>;
+		 *
+		 * Nokia 的 XG-040G-MF 用的是 10ms/20ms，两者都能在各自板上工作，
+		 * 但本板实测 10ms/20ms 下 MD32 固件加载完成后 MCU 始终不就绪
+		 * （FW_STATUS 读回 0x0），所以先试 EVB 的长复位。
+		 */
 		reset-gpios = <&an7583_pinctrl 34 GPIO_ACTIVE_LOW>;
-		reset-assert-us = <10000>;
-		reset-deassert-us = <20000>;
+		reset-assert-us = <1000000>;
+		reset-deassert-us = <100000>;
 	};
 };
 
