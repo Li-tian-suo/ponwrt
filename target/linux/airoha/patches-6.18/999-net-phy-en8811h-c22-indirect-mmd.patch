@@ -1,0 +1,72 @@
+--- a/drivers/net/phy/air_en8811h.c	2026-11-01 14:02:21.848856496 +0800
++++ b/drivers/net/phy/air_en8811h.c	2026-11-01 14:02:21.852815896 +0800
+@@ -1210,6 +1210,60 @@
+ 	return genphy_suspend(phydev);
+ }
+ 
++/*
++ * The EN8811H exposes its register space through the standard C22 indirect
++ * MMD window (register 13 = devad/command, register 14 = address/data).
++ *
++ * The generic helpers cannot be used here: with is_c45 == 0 the core hands
++ * MII_ADDR_C45 | dev << 16 | reg to mdiobus_read(), which overflows the five
++ * bit AN7583_MII_CL22_REG_ADDR field of the Airoha MDIO controller so its
++ * BUSY bit never clears (every access ends in -ETIMEDOUT), and with
++ * is_c45 == 1 the controller emits real C45 frames which this PHY does not
++ * answer. The vendor driver does the same thing: it only ever calls
++ * mdiobus_read()/mdiobus_write() and walks 13/14 by hand.
++ */
++#define AIR_MMD_CTRL_REG	0x0d
++#define AIR_MMD_DATA_REG	0x0e
++#define AIR_MMD_ADDR_MODE	0x4000
++
++static int air_mmd_access(struct phy_device *phydev, int devad, u16 regnum)
++{
++	int ret;
++
++	ret = phy_write(phydev, AIR_MMD_CTRL_REG, devad);
++	if (ret < 0)
++		return ret;
++
++	ret = phy_write(phydev, AIR_MMD_DATA_REG, regnum);
++	if (ret < 0)
++		return ret;
++
++	return phy_write(phydev, AIR_MMD_CTRL_REG, AIR_MMD_ADDR_MODE | devad);
++}
++
++static int en8811h_read_mmd(struct phy_device *phydev, int devad, u16 regnum)
++{
++	int ret;
++
++	ret = air_mmd_access(phydev, devad, regnum);
++	if (ret < 0)
++		return ret;
++
++	return phy_read(phydev, AIR_MMD_DATA_REG);
++}
++
++static int en8811h_write_mmd(struct phy_device *phydev, int devad, u16 regnum,
++			     u16 val)
++{
++	int ret;
++
++	ret = air_mmd_access(phydev, devad, regnum);
++	if (ret < 0)
++		return ret;
++
++	return phy_write(phydev, AIR_MMD_DATA_REG, val);
++}
++
+ static struct phy_driver en8811h_driver[] = {
+ {
+ 	PHY_ID_MATCH_MODEL(EN8811H_PHY_ID),
+@@ -1227,6 +1281,8 @@
+ 	.led_hw_is_supported	= en8811h_led_hw_is_supported,
+ 	.read_page		= air_phy_read_page,
+ 	.write_page		= air_phy_write_page,
++	.read_mmd		= en8811h_read_mmd,
++	.write_mmd		= en8811h_write_mmd,
+ 	.led_blink_set		= air_led_blink_set,
+ 	.led_brightness_set	= air_led_brightness_set,
+ 	.led_hw_control_set	= air_led_hw_control_set,
