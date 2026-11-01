@@ -1,0 +1,32 @@
+--- a/drivers/net/phy/air_en8811h.c	2026-11-01 13:36:08.772513700 +0800
++++ b/drivers/net/phy/air_en8811h.c	2026-11-01 13:36:08.778316000 +0800
+@@ -930,6 +930,29 @@
+ 		return -ENOMEM;
+ 	phydev->priv = priv;
+ 
++	/*
++	 * EN8811H 的 MMD 访问必须走真正的 Clause 45 帧。
++	 *
++	 * 若 is_c45 == 0，内核会把 phy_read_mmd()/phy_write_mmd() 翻译成
++	 * C22 间接窗口（寄存器 13/14），而本芯片不实现该窗口：合成地址
++	 * (MII_ADDR_C45 | dev << 16 | reg) 会溢出 AN7583_MII_CL22_REG_ADDR
++	 * 这个 5 位字段，Airoha MDIO 控制器的 BUSY 位永不释放，访问以
++	 * -ETIMEDOUT 收场。结果就是
++	 *
++	 *     en8811h_wait_mcu_ready failed: -110
++	 *     MCU not ready: 0x0
++	 *     Load firmware failed: -19
++	 *
++	 * 而固件下载本身走的是 page 机制（寄存器 0x1f + 0x10~0x18），
++	 * 不受影响，所以 MCU 其实已经起来了，只是状态读不出来。
++	 *
++	 * 本芯片的 MDIO_DEVS 寄存器为空，内核无法通过 C45 自动识别它，
++	 * 板级 DTS 只能用静态 ID（ethernet-phy-id03a2.a411）绑定驱动，
++	 * 而那条路径给出的 is_c45 恒为 0。这里在第一次 MMD 访问之前
++	 * 把它纠正过来。
++	 */
++	phydev->is_c45 = true;
++
+ 	ret = en8811h_load_firmware(phydev);
+ 	if (ret < 0)
+ 		return ret;

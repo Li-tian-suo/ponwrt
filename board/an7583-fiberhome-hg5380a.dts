@@ -187,27 +187,29 @@
 	/*
 	 * Airoha EN8811H 2.5G PHY（MDIO 地址 0x0f）。
 	 *
-	 * 这里照抄同为 AN7583 + EN8811H 的 Nokia XG-040G-MF
-	 * （an7583-nokia_xg-040g-mf-common.dtsi）——它是量产设备，最可信：
+	 * 复位脚 GPIO34 取自同为 AN7583 + EN8811H 的 Nokia XG-040G-MF
+	 * （an7583-nokia_xg-040g-mf-common.dtsi）。实测这是本板正确的复位线：
+	 * 换成 GPIO34 之前，PHY 一直被按在复位态，MDIO 读回全 0。
 	 *
-	 *     &mdio_0 {
-	 *             en8811: ethernet-phy@f {
-	 *                     compatible = "ethernet-phy-id03a2.a411";
-	 *                     reg = <0xf>;
-	 *                     reset-gpios = <&an7583_pinctrl 34 GPIO_ACTIVE_LOW>;
-	 *                     reset-assert-us = <10000>;
-	 *                     reset-deassert-us = <20000>;
-	 *             };
-	 *     };
+	 * compatible 用静态 ID，而不是 "ethernet-phy-ieee802.3-c45"：
 	 *
-	 * 注意复位脚：AN7583 EVB 用 GPIO28，Nokia 用 GPIO34，各家不同。
-	 * 之前我们照 EVB 写 GPIO28，如果那不是本板的复位线，PHY 会一直处于
-	 * 复位状态，MDIO 读回来全是 0（phy_id = 0x00000000），强制 ID 写法下
-	 * 则表现为 "MCU not ready: 0x0" / "Load firmware failed: -19" —— 两种
-	 * 现象我们都见过，根因是同一个。
+	 * 本芯片的 MDIO_DEVS 寄存器为空，内核的 C45 自动识别
+	 * （get_phy_c45_ids）拿不到它的 ID，实测写成 c45 之后驱动根本不会
+	 * 绑定（一条 en8811h 日志都没有）。静态 ID 能保证绑定。
 	 *
-	 * 不要再声明 0x0d / 0x0e：H3C HM2004-DU 的 DTS 明确指出那是 MDIO 总线
-	 * 上的幽灵地址，没有驱动，声明了只会产生幽灵 PHY。
+	 * 但静态 ID 这条路会让 is_c45 == 0，进而把 MMD 访问变成 C22 间接
+	 * 窗口（寄存器 13/14）——本芯片不支持该窗口，Airoha MDIO 控制器的
+	 * BUSY 位永不释放，于是
+	 *
+	 *     en8811h_wait_mcu_ready failed: -110    (总线级 ETIMEDOUT)
+	 *     MCU not ready: 0x0
+	 *     Load firmware failed: -19
+	 *
+	 * 为此在 999-net-phy-en8811h-force-cl45-mmd.patch 里让驱动在 probe
+	 * 开头强制 phydev->is_c45 = true，MMD 访问改走真正的 C45 帧。
+	 *
+	 * 0x0d / 0x0e 不要声明：H3C HM2004-DU 的 DTS 明确指出那是 MDIO 总线上
+	 * 的幽灵地址，声明了只会产生没有驱动的幽灵 PHY。
 	 */
 	en8811: ethernet-phy@f {
 		compatible = "ethernet-phy-id03a2.a411";
