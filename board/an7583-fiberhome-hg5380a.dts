@@ -69,8 +69,20 @@
 			function = "mdio";
 			groups = "mdio";
 		};
+		/*
+		 * "gpio2" 是从原厂 DTB 里抄来的：
+		 *
+		 *   mdio-pins {
+		 *           mux { function = "mdio"; groups = "mdio"; };
+		 *           conf { pins = "gpio2"; output-high; };
+		 *   };
+		 *
+		 * 原厂在配置 MDIO 引脚时额外把 gpio2 拉高，很可能是本板的
+		 * PHY 复位释放/供电使能脚。官方 EVB DTS 这里是 "mdio_0"，
+		 * 两个都保留，互不影响。
+		 */
 		conf {
-			pins = "mdio_0";
+			pins = "mdio_0", "gpio2";
 			output-high;
 		};
 	};
@@ -179,30 +191,46 @@
 	pinctrl-0 = <&mdio0_pins>;
 
 	/*
-	 * Airoha EN8811H 2.5G PHY —— 这是一颗 Clause 45 (C45) PHY。
+	 * Airoha EN8811H 2.5G PHY —— Clause 45 (C45) 器件。
 	 *
 	 * 必须显式声明 "ethernet-phy-ieee802.3-c45"，内核才会走
 	 * get_phy_c45_ids() 直接读 MMD 寄存器，驱动对 PBUS/固件寄存器的访问
-	 * 才成立。
+	 * 才成立。写成 compatible = "ethernet-phy-id03a2.a411" 会让
+	 * fwnode_get_phy_id() 解析成功，走 phy_device_create(..., 0, NULL)
+	 * 把 is_c45 硬编码成 0，MMD 访问退化成 C22 间接窗口，固件写不进 PBUS，
+	 * 表现为 "MCU not ready: 0x0" / "Load firmware failed: -19"。
 	 *
-	 * 曾经的写法 compatible = "ethernet-phy-id03a2.a411" 是错的：
-	 * fwnode_mdiobus_register_phy() 里 fwnode_get_phy_id() 一旦解析成功，
-	 * 就走
-	 *     phy_device_create(bus, addr, phy_id, 0, NULL);
-	 * 这个分支，is_c45 被硬编码为 0，所有 MMD 访问退化成 C22 间接窗口
-	 * （寄存器 13/14）。EN8811H 的 MDIO_DEVS1/2 为空、只能直连 C45，于是
-	 * 固件写不进 PBUS，表现为
-	 *     MCU not ready: 0x0 / Load firmware failed: -19
+	 * 地址与复位是从原厂固件里挖出来的（mtd2 = KernelA，DTB 偏移 12544，
+	 * 反编译后 model 为 airoha,an7583_evb）：
 	 *
-	 * 参照 LEDE 中同为烽火设备的 HG5382A（2.5G LAN 用 GPY211）写法：
-	 *     compatible = "maxlinear,gpy211", "ethernet-phy-ieee802.3-c45";
+	 *   mdio-bus {
+	 *           compatible = "airoha,arht-mdio";
+	 *           phy@13 { reg = <0x0d>; };
+	 *           phy@14 { reg = <0x0e>; };
+	 *           phy@15 { reg = <0x0f>; };
+	 *   };
+	 *
+	 * 原厂把 0x0d / 0x0e / 0x0f 三个地址都声明出来，且全都没有
+	 * compatible、也没有 reset-gpios。官方 EVB DTS 只写 0x0f 且带
+	 * reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>。
+	 *
+	 * 因此这里先按原厂做法：三个地址都探测、都不加 reset-gpios。
+	 * 若 GPIO28 并不是本板的 PHY 复位脚，内核反而会把它按在复位态，
+	 * 导致 MDIO 上一个字节都读不到（phy_id = 0x00000000）。
 	 */
 	en8811: ethernet-phy@f {
 		compatible = "ethernet-phy-ieee802.3-c45";
 		reg = <0xf>;
-		reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
-		reset-assert-us = <10000>;
-		reset-deassert-us = <20000>;
+	};
+
+	ethernet-phy@d {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <0xd>;
+	};
+
+	ethernet-phy@e {
+		compatible = "ethernet-phy-ieee802.3-c45";
+		reg = <0xe>;
 	};
 };
 
