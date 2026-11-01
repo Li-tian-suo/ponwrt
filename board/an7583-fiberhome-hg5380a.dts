@@ -288,6 +288,26 @@
 	phy-mode = "2500base-x";
 };
 
+/*
+ * gdm1 是 GSW 交换机的 CPU 口（switch 的 port@6 用 ethernet = <&gdm1>）。
+ *
+ * 不启用它的话，DSA 在 dsa_register_switch() 里走到
+ *
+ *     conduit = dsa_port_to_conduit(dp);
+ *     if (!conduit)
+ *             return -EPROBE_DEFER;      // net/dsa/dsa.c:1259
+ *
+ * 因为 CPU 口的 conduit 网卡永远不出现，switch 会永久 deferred probe：
+ *
+ *     platform 1fb58000.switch: deferred probe pending: (reason unknown)
+ *
+ * 结果不仅 lan2~lan4 没有，连 switch 自己的 mdio 总线（内部 PHY 9~12）
+ * 也不会注册，外部 PHY 也跟着受影响。
+ */
+&gdm1 {
+	status = "okay";
+};
+
 &eth {
 	status = "okay";
 };
