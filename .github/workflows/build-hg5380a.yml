@@ -1,4 +1,4 @@
-name: Build HG5380A (AN7583 FiberHome)
+﻿name: Build HG5380A (AN7583 FiberHome)
 
 # 适配 Li-tian-suo/ponwrt（pbs05/ponwrt 的 fork）
 # 前置：仓库里需要有 board/ 目录（本包提供的两个文件）
@@ -58,6 +58,14 @@ jobs:
           fi
           cat feeds.conf.default
 
+      - name: Fix exec bits
+        run: |
+          # 从 Windows 工作区导入时 NTFS 会丢失 Unix 可执行位，
+          # 这里统一补一遍，避免 scripts/feeds、config/check-*.sh 等报 Permission denied
+          chmod +x scripts/* config/* 2>/dev/null || true
+          find . -maxdepth 3 -name '*.sh' -not -path './build_dir/*' -not -path './staging_dir/*' -exec chmod +x {} + 2>/dev/null || true
+          echo "--- 抽查 ---"
+          ls -l scripts/feeds config/check-uname.sh 2>/dev/null || true
       - name: Update feeds
         run: ./scripts/feeds update -a
 
