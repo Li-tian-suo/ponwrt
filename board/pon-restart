@@ -1,0 +1,12 @@
+#!/bin/sh
+# 重启 PON 接口：先释放再拉起，用于光纤插好后手动触发重新配置。
+# 只操作 pon0，不影响 br-lan。
+
+ip link set pon0 down 2>/dev/null
+sleep 1
+ip link set pon0 up 2>/dev/null
+sleep 3
+
+echo "pon0: $(cat /sys/class/net/pon0/operstate 2>/dev/null || echo unknown)"
+echo "lifecycle: $(sed -n 's/^lifecycle: //p' /sys/kernel/debug/airoha-xpon-pon0/line 2>/dev/null)"
+echo "xgtc_sync: $(sed -n 's/^xgtc_sync: //p' /sys/kernel/debug/airoha-xpon-pon0/pcs 2>/dev/null)"

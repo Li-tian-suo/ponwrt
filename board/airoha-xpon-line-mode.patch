@@ -1,0 +1,88 @@
+--- /home/build/openwrt/feeds/pon_drivers/airoha-xpon/src/airoha-xpon-diagnostics.c.orig-patched	2026-11-03 05:17:28.197659943 +0800
++++ /home/build/openwrt/feeds/pon_drivers/airoha-xpon/src/airoha-xpon-diagnostics.c	2026-11-03 05:17:28.198507243 +0800
+@@ -10,6 +10,10 @@
+ #include <linux/netdevice.h>
+ #include <linux/seq_file.h>
+ #include <net/netlink.h>
++#include <net/rtnetlink.h>
++#include <linux/fs.h>
++#include <linux/string.h>
++#include <linux/uaccess.h>
+ 
+ #include "airoha-xpon-private.h"
+ #include "airoha-xpon-epon.h"
+@@ -644,6 +648,65 @@
+ }
+ DEFINE_SHOW_ATTRIBUTE(pon_registration_debug);
+ 
++
++/*
++ * 可写的 debugfs 文件，用于运行时切换 PON 线路模式：
++ *
++ *   echo xgspon > /sys/kernel/debug/airoha-xpon-pon0/line_mode
++ *
++ * 支持：gpon / xgpon / xgspon / epon-1g / epon-10g-1g / epon-10g-10g
++ * 只改 configured_mode，需要重新拉起接口才生效：
++ *   ifdown pon0; ifup pon0
++ *
++ * 用途：现场不知道线路是 GPON 还是 XG-PON/10G-EPON 时逐个试，
++ * 不用为了改 DTS 重新刷固件。
++ */
++static ssize_t airoha_xpon_line_mode_write(struct file *file,
++					   const char __user *ubuf,
++					   size_t len, loff_t *ppos)
++{
++	struct airoha_xpon *xpon = file->f_inode->i_private;
++	enum airoha_xpon_mode mode;
++	char buf[32];
++	size_t n = min(len, sizeof(buf) - 1);
++	int ret;
++
++	if (!xpon)
++		return -ENODEV;
++
++	if (copy_from_user(buf, ubuf, n))
++		return -EFAULT;
++	buf[n] = '\0';
++	strim(buf);
++	if (!*buf)
++		return -EINVAL;
++
++	ret = airoha_xpon_mode_parse(buf, &mode);
++	if (ret) {
++		dev_err(xpon->dev, "unknown PON line mode '%s'\n", buf);
++		return ret;
++	}
++
++	rtnl_lock();
++	mutex_lock(&xpon->state_lock);
++	ret = airoha_xpon_set_mode_locked(xpon, mode);
++	mutex_unlock(&xpon->state_lock);
++	rtnl_unlock();
++
++	if (ret)
++		return ret;
++
++	dev_info(xpon->dev,
++		 "PON line mode -> %s (run 'ifdown pon0; ifup pon0' to apply)\n",
++		 airoha_xpon_mode_name(mode));
++	return len;
++}
++
++static const struct file_operations airoha_xpon_line_mode_fops = {
++	.owner = THIS_MODULE,
++	.write = airoha_xpon_line_mode_write,
++};
++
+ void airoha_xpon_debugfs_init(struct airoha_xpon *xpon)
+ {
+ 	char name[64];
+@@ -665,6 +728,8 @@
+ 	                    &pon_registration_debug_fops);
+ 	debugfs_create_file("datapath", 0400, xpon->debug_dir, xpon,
+ 	                    &pon_datapath_debug_fops);
++	debugfs_create_file("line_mode", 0200, xpon->debug_dir, xpon,
++	                    &airoha_xpon_line_mode_fops);
+ }
+ 
+ void airoha_xpon_debugfs_remove(struct airoha_xpon *xpon)

@@ -1,0 +1,13 @@
+#!/bin/sh
+#
+# pondctl 兼容层
+#
+# 上游 luci-app-pon 调用：pondctl status --line <line>
+# 原版由 airoha-pond 守护进程提供协议层（OMCI/OAM）状态。
+# 本机没有该守护进程，这里返回一个空对象 —— UI 会把协议分组显示为
+# "Not provisioned"，不影响线路状态页。
+#
+# 如果以后接了 OMCI 实现，把结果填进来即可。
+
+echo '{}'
+exit 0

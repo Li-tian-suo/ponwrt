@@ -1,0 +1,15 @@
+{
+ "luci-app-pon-status": {
+  "description": "Grant access to the PON status page",
+  "read": {
+   "file": {
+    "/usr/bin/pon-selftest": [
+     "exec"
+    ],
+    "/usr/bin/pon-restart": [
+     "exec"
+    ]
+   }
+  }
+ }
+}

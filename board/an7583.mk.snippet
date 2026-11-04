@@ -1,0 +1,26 @@
+# 追加到 ponwrt 的 target/linux/airoha/image/an7583.mk 末尾
+#
+# 注意：这里不声明 ARTIFACT/preloader.bin 与 ARTIFACT/bl31-uboot.fip。
+# 本仓库 tools/ 里没有 fiptool，直接声明会让 target/linux 的 install 阶段
+# 报 “staging_dir/host/bin/fiptool: No such file or directory”（Error 127）。
+# U-Boot/FIP 由 workflow 里的独立步骤用 TF-A 的 fiptool 组装，见 build-hg5380a.yml。
+
+define Device/fiberhome_hg5380a
+	# 原厂 U-Boot 2023.04 的 LZMA 解码器解不了 OpenWrt 产出的 lp=2 数据流
+	# （uncompress error 7），改用 gzip，兼容性最好。
+	KERNEL_SUFFIX := -uImage.itb
+	KERNEL = kernel-bin | gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
+	KERNEL_NAME := Image
+	DEVICE_VENDOR := FiberHome
+	DEVICE_MODEL := HG5380A
+	DEVICE_DTS := an7583-fiberhome-hg5380a
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	KERNEL_SIZE := 6144k
+	DEVICE_PACKAGES := kmod-phy-airoha-en8811h \
+		kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond
+	IMAGES := sysupgrade.bin
+	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
+		pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += fiberhome_hg5380a

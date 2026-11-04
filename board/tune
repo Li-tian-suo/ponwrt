@@ -1,0 +1,16 @@
+#!/bin/sh /etc/rc.common
+# 实测结论：RPS/RFS 在这颗双核 A53 + AN7583 上没有任何收益。
+#   开 RPS：下行 2.08 Gbps / 上行 1.62 Gbps
+#   关 RPS：下行 2.09 Gbps / 上行 1.62 Gbps
+# 说明收包路径本来就已经在两个核之间分配好了，强行弹到另一个核只会
+# 增加缓存失效开销。所以这里只保留一个对 2.5G 突发有帮助的 backlog 值，
+# 不碰 rps_cpus。
+#
+# 参考基线（lan1，2.5G 链路，iperf3 -P 4）：
+#   下行 2.09~2.34 Gbps，上行 1.62~1.72 Gbps
+
+START=99
+
+boot() {
+	echo 1000 > /proc/sys/net/core/netdev_max_backlog 2>/dev/null
+}

@@ -1,0 +1,26 @@
+#!/bin/sh
+#
+# 保证 airoha-pond 能启动：omci/oam 段必须有 device（omci0/oam0）。
+#
+# airoha-pond 的 init 脚本为每条 xpon 线路寻找匹配的 protocol 段，并从该段
+# 读 device 作为控制口。缺这个选项时会直接报
+#   "omci control device for line 'line0' is missing"
+# 而拒绝启动 —— 于是 OMCI 无人应答，业务永远下发不下来。
+#
+# 用户从旧镜像继承的 /etc/config/pon 可能没有这一项，这里补齐。
+
+[ -f /etc/config/pon ] || exit 0
+
+[ "$(uci -q get pon.omci0)" = "omci" ] && {
+	uci -q get pon.omci0.device >/dev/null || \
+		uci -q set pon.omci0.device='omci0'
+}
+
+[ "$(uci -q get pon.oam0)" = "oam" ] && {
+	uci -q get pon.oam0.device >/dev/null || \
+		uci -q set pon.oam0.device='oam0'
+}
+
+uci -q commit pon
+
+exit 0

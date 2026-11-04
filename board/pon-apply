@@ -1,0 +1,42 @@
+#!/bin/sh /etc/rc.common
+#
+# 把 /etc/config/pon 里的 mode 应用到驱动。
+#
+# 上游设计里这是 airoha-pond 守护进程的职责（Rust），本机没有该进程，
+# 所以用这个脚本代替：开机时执行一次，也可以随时手动 /usr/bin/pon-apply。
+#
+# 之所以需要它：luci-app-pon 的“Configuration”页面只写 UCI，真正的应用
+# 动作原本由守护进程完成。
+
+START=98
+USE_PROCD=0
+
+apply_mode() {
+	local mode dev
+	mode=$(uci -q get pon.line0.mode)
+	dev=$(uci -q get pon.line0.device)
+	[ -n "$dev" ] || dev=pon0
+
+	[ -n "$mode" ] || return 0
+
+	D=/sys/kernel/debug/airoha-xpon-$dev
+	[ -d /sys/kernel/debug ] || mkdir -p /sys/kernel/debug
+	mountpoint -q /sys/kernel/debug 2>/dev/null || \
+		mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+	if [ -w "$D/line_mode" ]; then
+		cur=$(sed -n 's/^configured_mode: //p' "$D/line" 2>/dev/null | head -1)
+		if [ "$cur" != "$mode" ]; then
+			echo "$mode" > "$D/line_mode" 2>/dev/null
+			logger -t pon-apply "line mode set to $mode (was $cur)"
+			# 重新拉起接口让模式生效
+			ip link set "$dev" down 2>/dev/null
+			sleep 1
+			ip link set "$dev" up 2>/dev/null
+		fi
+	fi
+}
+
+boot() {
+	apply_mode
+}

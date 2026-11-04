@@ -1,0 +1,20 @@
+# PON 线路配置（供 luci-app-pon 与 airoha-pond 使用）
+#
+# 上游 UI 通过 uci.sections('pon', 'xpon') 读取线路：
+#   device —— 网络设备名（pon0）
+#   mode   —— gpon / xgpon / xgspon / epon-1g / epon-10g-1g / epon-10g-10g
+#
+# airoha-pond 的 init 脚本会为每个 xpon 段找一个 protocol 段（omci/oam），
+# 并从该段读取 device（omci0/oam0）作为控制口。**这个 device 不能省**，
+# 否则守护进程会报 "omci control device for line 'line0' is missing" 并拒绝启动。
+
+config xpon 'line0'
+	option device 'pon0'
+	option line 'line0'
+	option mode 'xgpon'
+
+# OMCI 段：GPON/XG-PON 家族用 omci0，EPON 家族用 oam0
+config omci 'omci0'
+	option line 'line0'
+	option device 'omci0'
+	option omcc_version '0xb0'

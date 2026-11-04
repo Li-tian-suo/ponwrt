@@ -1,0 +1,22 @@
+#
+# 内核自带的 gpio-keys 驱动会和 OpenWrt 的 gpio-button-hotplug
+# 抢同一个驱动名（Driver 'gpio-keys' is already registered），
+# 所以这里只保留 INPUT 核心，按键交给 gpio-button-hotplug 接管。
+#
+# AN7581/AN7583 boards have a reset/WPS button. The generic config disables
+# the whole input subsystem, which makes gpio-keys (and gpio-button-hotplug)
+# dead code. Enable just what a board button needs.
+#
+CONFIG_INPUT=y
+CONFIG_INPUT_EVDEV=y
+CONFIG_INPUT_KEYBOARD=y
+# CONFIG_KEYBOARD_GPIO is not set
+# CONFIG_KEYBOARD_GPIO_POLLED is not set
+
+#
+# AN7583 OPP/required-opps parsing crashes in 6.18 (NULL deref inside
+# _of_add_table_indexed -> dev_pm_opp_of_cpumask_add_table). Frequency
+# scaling is not needed for this board yet, so keep the DT cpufreq driver out.
+#
+# CONFIG_CPUFREQ_DT is not set
+# CONFIG_ARM_AIROHA_SOC_CPUFREQ is not set

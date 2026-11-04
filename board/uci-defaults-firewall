@@ -1,0 +1,33 @@
+#!/bin/sh
+#
+# 防火墙开关修正（首次启动执行一次）
+#
+# 1) AN7583 + Linux 6.18 上，fw4 生成的 flowtable 规则会加载失败：
+#
+#   /dev/stdin:225:29-44: Error: Could not process rule: Protocol error
+#                   meta l4proto { tcp, udp } flow offload @fb;
+#
+# 整个 nft 规则集因此没能装进去，INPUT 被整体拒绝 —— 表现为没有 DHCP、
+# ping 不通、22/80 全关（二层 ARP 却是正常的，很容易误判成死机）。
+#
+# 仓库里的 firewall4 补丁把这两个默认值写成了 1，这里在首次启动时改回 0。
+# 软件 flow offload 对这台机器没有收益（实测 RPS/offload 都不提升吞吐），
+# 关掉更稳。
+
+uci -q set firewall.@defaults[0].flow_offloading='0'
+uci -q set firewall.@defaults[0].flow_offloading_hw='0'
+
+# 2) wan 区域必须包含真正拨号的那个接口。
+#
+# 本机上网接口叫 pppoe（device pon0.41，VLAN 41），而默认模板里 wan 区域
+# 只有 wan/wan6 两个 dhcp 接口 —— 这两个在 PPPoE 下根本不存在。结果是
+# lan -> pppoe 的转发被 REJECT，表现为：
+#   路由器自己能上网，但从电脑经它上网时返回 "Destination port unreachable"
+# 很容易被误判成"拨号失败"。这里把区域改成只含 pppoe。
+
+uci -q delete firewall.@zone[1].network
+uci -q add_list firewall.@zone[1].network='pppoe'
+
+uci -q commit firewall
+
+exit 0

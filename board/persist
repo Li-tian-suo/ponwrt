@@ -1,0 +1,87 @@
+#!/bin/sh /etc/rc.common
+# FiberHome HG5380A: 让 UCI 配置、账号凭据和 SSH 主机密钥在重启后保留。
+#
+# 背景：rootfs 是只读 squashfs，而这颗 SPI-NAND 上 fstools 无法提供可写
+# overlay（jffs2 需要 OOB，而 OOB 全部被 ECC 占用；extroot 也不接受
+# /dev/mtdblockN）。所以挂载 ext4 分区，把需要持久化的路径接上去。
+#
+# 两条原则（都是踩过坑总结的）：
+#
+# 1. 绝不 bind 整个 /etc —— 那样会把 /etc/init.d、/etc/rc.d 盖住，
+#    除本脚本外所有服务都不会启动。
+#
+# 2. /etc/shadow、/etc/passwd 不能用 bind 挂载，必须"开机复制、用时写回"。
+#    因为 passwd 会在同一文件系统内把 /etc/shadow 重命名成 /etc/shadow-
+#    做备份，bind 挂载是跨设备的，重命名会失败：
+#      passwd: can't create backup copy '/etc/shadow-': Cross-device link
+#      passwd: can't update password file /etc/shadow
+#    目录型的路径（/etc/config、/root、/etc/dropbear）bind 没有这个问题。
+
+START=05
+USE_PROCD=0
+
+DEV=/dev/mtdblock7
+MP=/mnt/persist
+
+sync_credentials() {
+	# 内存层 -> ext4
+	for f in shadow passwd; do
+		if [ -f "/etc/$f" ] && [ -d "$MP/etc" ]; then
+			if ! cmp -s "/etc/$f" "$MP/etc/$f" 2>/dev/null; then
+				cp -f "/etc/$f" "$MP/etc/$f" 2>/dev/null && sync
+			fi
+		fi
+	done
+}
+
+boot() {
+	[ -b "$DEV" ] || return 0
+	mkdir -p "$MP"
+	mount -t ext4 -o rw,noatime "$DEV" "$MP" 2>/dev/null || return 0
+
+	# 首次使用时播种，之后只补镜像新增的默认配置（不覆盖用户改动）
+	if [ ! -d "$MP/etc/config" ]; then
+		mkdir -p "$MP/etc"
+		cp -a /etc/config "$MP/etc/" 2>/dev/null
+		cp -a /etc/shadow /etc/passwd "$MP/etc/" 2>/dev/null
+		[ -d /etc/dropbear ] && cp -a /etc/dropbear "$MP/etc/" 2>/dev/null
+		sync
+	fi
+
+	for f in /etc/config/*; do
+		[ -f "$f" ] || continue
+		b=$(basename "$f")
+		[ -e "$MP/etc/config/$b" ] || cp -a "$f" "$MP/etc/config/$b" 2>/dev/null
+	done
+
+	# 目录型：直接 bind
+	[ -d "$MP/etc/config" ] && mount -o bind "$MP/etc/config" /etc/config
+	[ -d "$MP/etc/dropbear" ] && mount -o bind "$MP/etc/dropbear" /etc/dropbear
+	if [ ! -d "$MP/root" ]; then
+		mkdir -p "$MP/root"
+		cp -a /root/. "$MP/root/" 2>/dev/null
+	fi
+	mount -o bind "$MP/root" /root
+
+	# 文件型：复制进来（不能 bind，见文件头说明）
+	for f in shadow passwd; do
+		if [ -f "$MP/etc/$f" ]; then
+			cp -f "$MP/etc/$f" "/etc/$f" 2>/dev/null
+			[ "$f" = "shadow" ] && chmod 600 /etc/shadow
+			[ "$f" = "passwd" ] && chmod 644 /etc/passwd
+		fi
+	done
+
+	# 后台定期把凭据写回 ext4（掉电时最多丢 1 分钟内的改动）
+	(
+		while true; do
+			sleep 60
+			sync_credentials
+		done
+	) &
+}
+
+stop() {
+	sync_credentials
+	sync
+}

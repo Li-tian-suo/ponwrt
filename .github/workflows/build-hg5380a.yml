@@ -1,0 +1,182 @@
+name: Build HG5380A (AN7583 FiberHome)
+
+# 适配 Li-tian-suo/ponwrt（pbs05/ponwrt 的 fork）
+# 前置：仓库里需要有 board/ 目录（本包提供的两个文件）
+on:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: '构建档位：minimal=最小验证版（推荐首次），full=完整包集合'
+        type: choice
+        options:
+          - minimal
+          - full
+        default: minimal
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget
+
+      - name: Apply board files
+        run: |
+          test -f board/an7583-fiberhome-hg5380a.dts
+          cp board/an7583-fiberhome-hg5380a.dts target/linux/airoha/dts/
+          if ! grep -q fiberhome_hg5380a target/linux/airoha/image/an7583.mk; then
+            cat board/an7583.mk.snippet >> target/linux/airoha/image/an7583.mk
+          fi
+          grep -n "fiberhome_hg5380a" target/linux/airoha/image/an7583.mk | head
+
+      - name: Trim feeds (minimal)
+        env:
+          PROFILE: ${{ inputs.profile || 'minimal' }}
+        run: |
+          # openwrt/video 里的 qt5 有 Kconfig 递归依赖，最小版不需要它
+          if [ "$PROFILE" = "minimal" ]; then
+            sed -i '/^src-git video /d' feeds.conf.default
+          fi
+          cat feeds.conf.default
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      - name: Provide libffi
+        run: |
+          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
+          git -C /tmp/owrt sparse-checkout set package/libs/libffi
+          mkdir -p package/libs
+          cp -a /tmp/owrt/package/libs/libffi package/libs/
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Configure
+        env:
+          PROFILE: ${{ inputs.profile || 'minimal' }}
+        run: |
+          echo "profile = $PROFILE"
+          if [ "$PROFILE" = "full" ]; then
+            cp configs/an7583.config .config
+            sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
+            echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y' >> .config
+            if [ -f configs/an7581-tyfza1-packages.config ]; then
+              grep '^CONFIG_PACKAGE_' configs/an7581-tyfza1-packages.config >> .config || true
+            fi
+          else
+            # 最小验证版：用已知可用的 an7583.config 打底（保留 target/内核元数据），
+            # 但去掉所有已选中的软件包，只留 LuCI 基础与必备件。
+            cp configs/an7583.config .config
+            grep -v '^CONFIG_PACKAGE_[A-Za-z0-9_.-]*=y$' .config > .config.trim || true
+            mv .config.trim .config
+            sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
+            echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y' >> .config
+            cat >> .config <<'EOF'
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_airoha-en8811h-firmware=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-en7572=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
+          # CONFIG_PACKAGE_luci-app-fwknopd is not set
+          # CONFIG_PACKAGE_squeezelite-custom is not set
+          EOF
+            sed -i 's/^ *//' .config
+          fi
+          # 两个档位都要的板级驱动与 PON 组件（设备级 DEVICE_PACKAGES 在本仓库不生效，显式加）
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-en7572=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
+          CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_airoha-en8811h-firmware=y
+          EOF
+          sed -i 's/^ *//' .config
+          make defconfig
+          echo "--- device selection ---"
+          grep -E '^CONFIG_TARGET_DEVICE_airoha' .config | grep '=y' || {
+            echo "设备未被选中，请检查 an7583.mk 里的设备名"; exit 1; }
+          echo "--- package count ---"
+          grep -c '^CONFIG_PACKAGE_.*=y' .config || true
+
+      - name: Download sources
+        run: make download -j8 || true
+
+      - name: Compile
+        run: make -j$(nproc) || (make -j1 V=s 2>&1 | tail -n 300; false)
+
+      - name: Assemble U-Boot FIP (best effort)
+        continue-on-error: true
+        run: |
+          # 仓库 tools/ 里没有 fiptool，用 TF-A 自带的构建
+          if [ ! -x staging_dir/host/bin/fiptool ]; then
+            git clone --depth 1 https://github.com/ARM-software/arm-trusted-firmware /tmp/atf || true
+            # 必须在 TF-A 根目录跑，并给出可写的 BUILD_DIR，否则会尝试 mkdir /tools
+            make -C /tmp/atf/tools/fiptool BUILD_DIR=/tmp/atf/build -j"$(nproc)" || true
+            FIP=$(find /tmp/atf -type f -name fiptool -perm -u+x 2>/dev/null | head -1)
+            echo "found fiptool: ${FIP:-none}"
+            [ -n "$FIP" ] && cp "$FIP" staging_dir/host/bin/fiptool || true
+          fi
+          ls -l staging_dir/host/bin/fiptool || true
+          IMG="staging_dir/target-aarch64_cortex-a53_musl/image"
+          ls -l "$IMG" | head -30 || true
+          if [ -f "$IMG/an7583-bl2.bin" ]; then
+            staging_dir/host/bin/fiptool create --tb-fw "$IMG/an7583-bl2.bin" \
+              "$IMG/an7583_hg5380a-bl2.fip" && cp "$IMG/an7583_hg5380a-bl2.fip" bin/targets/airoha/an7583/preloader.bin
+          fi
+          if [ -f "$IMG/an7583-bl31.lzma" ] && [ -f "$IMG/an7583_hg5380a-u-boot.lzma" ]; then
+            staging_dir/host/bin/fiptool create --soc-fw "$IMG/an7583-bl31.lzma" \
+              --nt-fw "$IMG/an7583_hg5380a-u-boot.lzma" "$IMG/an7583_hg5380a-bl31-u-boot.fip" && \
+              cp "$IMG/an7583_hg5380a-bl31-u-boot.fip" bin/targets/airoha/an7583/bl31-uboot.fip
+          fi
+          ls -l bin/targets/airoha/an7583/ || true
+
+      - name: List artifacts
+        if: always()
+        run: find bin/targets/airoha/an7583 -maxdepth 1 -type f -printf '%f  %s\n' 2>/dev/null || true
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hg5380a-${{ inputs.profile || 'minimal' }}
+          if-no-files-found: warn
+          path: |
+            bin/targets/airoha/an7583/*sysupgrade*
+            bin/targets/airoha/an7583/preloader.bin
+            bin/targets/airoha/an7583/*.fip
+            bin/targets/airoha/an7583/*.itb
+            bin/targets/airoha/an7583/*.manifest
+            bin/targets/airoha/an7583/config.buildinfo

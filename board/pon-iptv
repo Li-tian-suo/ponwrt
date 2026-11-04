@@ -1,0 +1,81 @@
+#!/bin/sh
+#
+# pon-iptv —— 在 ONU 上搭 IPTV 通道
+#
+# 用法：
+#   pon-iptv on [vlan] [port]   默认 vlan=45 port=lan4
+#   pon-iptv off
+#   pon-iptv status
+#
+# 原理：
+#   OLT 通过 OMCI 下发三个单播 VLAN（本线路是 41/45/46）和一个组播 VLAN（50）。
+#   41 已验证是上网；45 通常是 IPTV。组播流由 OLT 直接推到组播 GEM，
+#   ONU 这边只要把该 VLAN 桥到机顶盒所在的 LAN 口，并打开 IGMP snooping，
+#   机顶盒的 IGMP 加入报文就会上送，组播随之按需转发。
+
+BR=br-iptv
+IF_VLAN=pon0.45
+IF_PON=pon0.45
+PORT=lan4
+VLAN=45
+
+usage() {
+	echo "用法: pon-iptv on [vlan] [port] | off | status" >&2
+	exit 2
+}
+
+do_off() {
+	ip link set $BR down 2>/dev/null
+	for i in $(ls /sys/class/net/$BR/brif/ 2>/dev/null); do
+		ip link set "$i" nomaster 2>/dev/null
+	done
+	ip link del $BR 2>/dev/null
+	ip link del $IF_PON 2>/dev/null
+	# 把 LAN 口还给 br-lan
+	[ -d /sys/class/net/br-lan/brif/$PORT ] || ip link set "$PORT" master br-lan 2>/dev/null
+	echo "IPTV 通道已拆除"
+}
+
+do_on() {
+	[ -n "$1" ] && VLAN="$1"
+	[ -n "$2" ] && PORT="$2"
+	IF_PON="pon0.$VLAN"
+
+	do_off >/dev/null 2>&1
+
+	ip link add link pon0 name "$IF_PON" type vlan id "$VLAN" 2>/dev/null || {
+		echo "创建 $IF_PON 失败（pon0 是否在？）" >&2; exit 1; }
+	ip link set "$IF_PON" up
+
+	ip link add $BR type bridge 2>/dev/null || { echo "创建网桥失败" >&2; exit 1; }
+	ip link set $BR type bridge mcast_snooping 1 mcast_querier 1 2>/dev/null
+	ip link set "$IF_PON" master $BR
+	ip link set "$PORT" master $BR 2>/dev/null || echo "警告: $PORT 不在 br-lan 中？"
+	ip link set $BR up
+
+	echo "IPTV 通道已建立: $IF_PON + $PORT -> $BR (IGMP snooping 已开)"
+	echo "  把机顶盒插到 $PORT"
+	echo "  注意：$PORT 已从 br-lan 移出，该口不再上网"
+}
+
+do_status() {
+	echo "=== 网桥 ==="
+	ls /sys/class/net/ 2>/dev/null | grep -E '^br-' | sed 's/^/  /'
+	echo "=== IPTV 网桥成员 ==="
+	ls /sys/class/net/$BR/brif/ 2>/dev/null | sed 's/^/  /' || echo "  (未建立)"
+	echo "=== snooping ==="
+	cat /sys/class/net/$BR/bridge/multicast_snooping 2>/dev/null
+	echo "=== VLAN 子接口 ==="
+	ls /proc/net/vlan/ 2>/dev/null | grep -v config | sed 's/^/  /'
+	echo "=== 组播组（机顶盒加入的）==="
+	cat /proc/net/igmp 2>/dev/null | head -20
+	echo "=== 数据面计数 ==="
+	grep -E 'channel_.*_rx|rx_packets_delivered' /sys/kernel/debug/airoha-xpon-pon0/datapath 2>/dev/null
+}
+
+case "$1" in
+on)     shift; do_on "$@" ;;
+off)    do_off ;;
+status) do_status ;;
+*)      usage ;;
+esac

@@ -1,0 +1,18 @@
+#!/bin/sh
+#
+# 修正 /etc/config/uhttpd 里两个会让 LuCI 返回 403 的设置。
+#
+# 1) rfc1918_filter：内网设备访问自己的管理界面时会被判为 DNS rebinding
+#    而拒绝（403）。家庭/内网场景没有意义，关掉。
+# 2) lua_prefix：指向 /usr/lib/lua/luci/sgi/uhttpd.lua，但本镜像是 ucode 版
+#    LuCI（/www/cgi-bin/luci 的 shebang 是 #!/usr/bin/env ucode），
+#    这行会让 /cgi-bin/luci 直接 403。必须删掉，让它按 CGI 执行。
+#
+# 这两条以前只在运行时修过，恢复出厂或来自旧快照的配置会重新带上，
+# 所以放到 uci-defaults 里每次启动纠正一次。
+
+uci -q set uhttpd.main.rfc1918_filter='0'
+uci -q del_list uhttpd.main.lua_prefix='/cgi-bin/luci=/usr/lib/lua/luci/sgi/uhttpd.lua'
+uci -q commit uhttpd
+
+exit 0

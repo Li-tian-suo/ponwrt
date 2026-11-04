@@ -1,0 +1,13 @@
+#!/bin/sh
+#
+# 把 Argon 设为默认主题。
+#
+# 原因：luci-theme-argon 自带 30_luci-theme-argon 和 luci-theme-bootstrap 自带
+# 30_luci-theme-bootstrap，两者编号相同，uci-defaults 按文件名字母序执行，
+# "30_luci-theme-bootstrap" 排在后面 → 会把 mediaurlbase 覆盖回 bootstrap。
+# 这里用更高优先级（99）重新设回 argon。
+
+uci -q set luci.main.mediaurlbase='/luci-static/argon'
+uci -q commit luci
+
+exit 0

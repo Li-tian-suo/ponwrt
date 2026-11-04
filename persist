@@ -1,0 +1,51 @@
+#!/bin/sh /etc/rc.common
+# FiberHome HG5380A: make UCI config, credentials and SSH host keys survive
+# reboots.
+#
+# The rootfs is a read-only squashfs and fstools cannot provide a writable
+# overlay on this SPI-NAND (jffs2 needs OOB that the ECC engine owns, extroot
+# does not accept /dev/mtdblockN here). So mount the ext4 partition and bind
+# only the individual paths that must persist.
+#
+# Never bind the whole /etc: that hides /etc/init.d and /etc/rc.d from procd
+# and no service starts at all.
+
+START=05
+USE_PROCD=0
+
+DEV=/dev/mtdblock7
+MP=/mnt/persist
+
+boot() {
+	[ -b "$DEV" ] || return 0
+	mkdir -p "$MP"
+	mount -t ext4 -o rw,noatime "$DEV" "$MP" 2>/dev/null || return 0
+
+	# Seed the persistent copy on first use, then merge in any defaults that
+	# newer images added (a fresh package may ship its own /etc/config file).
+	# Existing files are never overwritten, so user settings survive upgrades.
+	if [ ! -d "$MP/etc/config" ]; then
+		mkdir -p "$MP/etc"
+		cp -a /etc/config "$MP/etc/" 2>/dev/null
+		cp -a /etc/shadow /etc/passwd "$MP/etc/" 2>/dev/null
+		[ -d /etc/dropbear ] && cp -a /etc/dropbear "$MP/etc/" 2>/dev/null
+		sync
+	fi
+
+	for f in /etc/config/*; do
+		[ -f "$f" ] || continue
+		b=$(basename "$f")
+		[ -e "$MP/etc/config/$b" ] || cp -a "$f" "$MP/etc/config/$b" 2>/dev/null
+	done
+
+	[ -d "$MP/etc/config" ] && mount -o bind "$MP/etc/config" /etc/config
+	[ -f "$MP/etc/shadow" ] && mount -o bind "$MP/etc/shadow" /etc/shadow
+	[ -f "$MP/etc/passwd" ] && mount -o bind "$MP/etc/passwd" /etc/passwd
+	[ -d "$MP/etc/dropbear" ] && mount -o bind "$MP/etc/dropbear" /etc/dropbear
+
+	if [ ! -d "$MP/root" ]; then
+		mkdir -p "$MP/root"
+		cp -a /root/. "$MP/root/" 2>/dev/null
+	fi
+	mount -o bind "$MP/root" /root
+}

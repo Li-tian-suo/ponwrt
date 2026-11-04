@@ -1,0 +1,116 @@
+#!/bin/sh
+#
+# ponctl 兼容层
+#
+# 上游 luci-app-pon 依赖 Rust 写的 airoha-ponctl，其 LuCI 只用到一条命令：
+#     ponctl --device <dev> status --json
+# 这里用 shell 从 debugfs 读同样的字段，输出符合其 schema 的 JSON。
+#
+# schema_version / line / frontend / registration / datapath / counters 的字段名
+# 与 luci-app-pon/htdocs/.../view/pon/status.js 读取的完全对应。
+
+[ -d /sys/kernel/debug ] || mkdir -p /sys/kernel/debug
+mountpoint -q /sys/kernel/debug 2>/dev/null || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+D=/sys/kernel/debug/airoha-xpon-pon0
+
+# 解析参数（忽略不认识的）
+CMD=
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--device) shift 2 ;;
+	status)   CMD=status; shift ;;
+	--json)   shift ;;
+	*)        shift ;;
+	esac
+done
+
+[ "$CMD" = "status" ] || exit 1
+
+val() { sed -n "s/^$1: //p" "$2" 2>/dev/null | head -1; }
+num() {
+	v=$(val "$1" "$2")
+	case "$v" in
+	''|*[!0-9]*) echo 0 ;;
+	*) echo "$v" ;;
+	esac
+}
+bool() {
+	v=$(val "$1" "$2")
+	case "$v" in
+	1|yes|true|on) echo true ;;
+	*) echo false ;;
+	esac
+}
+str() {
+	v=$(val "$1" "$2")
+	# 转义双引号和反斜杠
+	v=$(printf '%s' "$v" | sed 's/\\/\\\\/g; s/"/\\"/g')
+	echo "\"$v\""
+}
+
+LINE="$D/line"
+PCS="$D/pcs"
+FE="$D/frontend"
+REG="$D/registration"
+DP="$D/datapath"
+
+mode=$(val configured_mode "$LINE")
+[ -n "$mode" ] || mode="xgpon"
+
+cat <<EOF
+{
+  "schema_version": 1,
+  "line": {
+    "mode": $(str configured_mode "$LINE"),
+    "mode_pending": false,
+    "configured_mode": $(str configured_mode "$LINE"),
+    "active_mode": $(str active_mode "$LINE"),
+    "lifecycle": $(str lifecycle "$LINE"),
+    "optical_signal": $(bool optical_signal "$LINE"),
+    "pcs_profile": $(str pcs_profile "$LINE"),
+    "pcs_profile_valid": $(bool available "$PCS"),
+    "pcs_sync": $(str xgtc_sync "$PCS"),
+    "xgtc_sync": $(str xgtc_sync "$PCS"),
+    "phy_ready": $(bool phy_ready "$PCS"),
+    "last_start_error": $(num last_start_error "$LINE")
+  },
+  "frontend": {
+    "error": $(num error "$FE"),
+    "calibration": $(str calibration "$FE"),
+    "tx_gate_enabled": $(bool tx_gate_enabled "$FE")
+  },
+  "registration": {
+    "onu_state": $(str onu_state "$REG"),
+    "onu_id": $(num onu_id "$REG"),
+    "onu_id_valid": false,
+    "llid": 0,
+    "llid_valid": false,
+    "upstream_tx_armed": $(bool upstream_tx_armed "$REG"),
+    "mpcp_state": "n/a"
+  },
+  "datapath": {
+    "data_path_configured": $(bool data_path_configured "$DP"),
+    "service_ready": $(bool service_ready "$DP")
+  },
+  "counters": {
+    "rx_start_count": $(num rx_start_count "$LINE"),
+    "recoveries": 0,
+    "sync_losses": 0,
+    "discovery_gates": 0,
+    "register_requests": 0,
+    "register_acks": 0,
+    "register_nacks": 0,
+    "register_messages": 0,
+    "ploamd_rx": $(num ploamd_accepted "$REG"),
+    "ploamu_tx": 0,
+    "upstream_bursts_tx": $(num tx_packets_completed "$DP"),
+    "xgem_tx": $(num tx_packets_submitted "$DP"),
+    "xgem_rx": $(num rx_packets_delivered "$DP"),
+    "xgtc_rx": 0,
+    "mac_errors": $(num rx_crc_errors "$DP"),
+    "mpcp_timeouts": 0,
+    "full_reinitializations": 0
+  }
+}
+EOF

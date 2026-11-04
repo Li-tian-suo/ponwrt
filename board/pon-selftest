@@ -1,0 +1,62 @@
+#!/bin/sh
+# HG5380A PON 自检：一条命令输出所有 PON 相关状态。
+# 无光纤时用来确认本地链路正常（BOSA 校准、SerDes、LOS 逻辑）；
+# 插上光纤后再跑一次，对比 xgtc_sync / ONU-ID 是否推进。
+
+D=/sys/kernel/debug/airoha-xpon-pon0
+
+# debugfs 必须可用（开机早期可能还没挂）
+[ -d /sys/kernel/debug ] || mkdir -p /sys/kernel/debug
+mountpoint -q /sys/kernel/debug 2>/dev/null || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+
+echo "=========== HG5380A PON 自检 ==========="
+echo
+
+echo "--- 光模块 (BOSA) ---"
+dmesg | grep -i "paged-bosa" | tail -2
+[ -r /sys/bus/i2c/devices/0-0051/name ] && echo "i2c 设备: $(cat /sys/bus/i2c/devices/0-0051/name)"
+echo
+
+echo "--- 线路 (line) ---"
+cat "$D/line" 2>/dev/null || echo "(无 line 节点)"
+echo
+
+echo "--- 前端 (frontend) ---"
+cat "$D/frontend" 2>/dev/null || echo "(无 frontend 节点)"
+echo
+
+echo "--- PCS / SerDes ---"
+cat "$D/pcs" 2>/dev/null || echo "(无 pcs 节点)"
+echo
+
+echo "--- MAC ---"
+cat "$D/mac" 2>/dev/null || echo "(无 mac 节点)"
+echo
+
+echo "--- 注册状态 (registration) ---"
+cat "$D/registration" 2>/dev/null || echo "(无 registration 节点)"
+echo
+
+echo "--- 数据通路 (datapath) ---"
+cat "$D/datapath" 2>/dev/null || echo "(无 datapath 节点)"
+echo
+
+echo "--- 接口 ---"
+ip -br addr show pon0 2>/dev/null
+echo "carrier: $(cat /sys/class/net/pon0/carrier 2>/dev/null)  mtu: $(cat /sys/class/net/pon0/mtu 2>/dev/null)"
+echo
+
+echo "--- LOS 指示灯 ---"
+if [ -r /sys/class/leds/green:los/brightness ]; then
+	echo "brightness=$(cat /sys/class/leds/green:los/brightness)"
+	echo "trigger=$(grep -o '\[.*\]' /sys/class/leds/green:los/trigger | tr -d '[]')"
+else
+	echo "(green:los 不存在)"
+fi
+echo
+
+echo "--- 最近 PON 内核日志 ---"
+dmesg | grep -iE "xpon|pon0|bosa|pcs" | tail -12
+echo
+echo "=========== 自检结束 ==========="

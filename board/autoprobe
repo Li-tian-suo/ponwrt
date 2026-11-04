@@ -1,0 +1,75 @@
+#!/bin/sh /etc/rc.common
+#
+# 自动探测 PON 线路模式（现场无人值守用）
+#
+# 触发条件：存在 /mnt/persist/autoprobe 或 /overlay/autoprobe。
+# 结果写入：/mnt/persist/pon-autoprobe.log（ext4 分区，重启不丢）
+#
+# 用法：
+#   走之前 touch /mnt/persist/autoprobe
+#   到现场插光纤、上电
+#   回来 cat /mnt/persist/pon-autoprobe.log
+
+START=99
+USE_PROCD=0
+
+D=/sys/kernel/debug/airoha-xpon-pon0
+LOG=/mnt/persist/pon-autoprobe.log
+MODES="xgpon gpon xgspon epon-10g-10g epon-10g-1g epon-1g"
+
+snapshot() {
+	grep -h -E "^(configured_mode|active_mode|lifecycle|optical_signal|rx_power_8472)" \
+		"$D/line" 2>/dev/null
+	grep -h -E "^(xgtc_sync|freqdet_locked|signal_detected|frequency_level)" "$D/pcs" 2>/dev/null
+	grep -h -E "^(onu_state|onu_id|ploamd_accepted|ploamd_rejected)" "$D/registration" 2>/dev/null
+}
+
+boot() {
+	[ -f /mnt/persist/autoprobe ] || [ -f /overlay/autoprobe ] || return 0
+
+	[ -d /sys/kernel/debug ] || mkdir -p /sys/kernel/debug
+	mountpoint -q /sys/kernel/debug 2>/dev/null || \
+		mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+	[ -w "$D/line_mode" ] || { echo "no line_mode node" >> "$LOG"; return 0; }
+
+	for i in $(seq 1 20); do
+		mountpoint -q /mnt/persist 2>/dev/null && break
+		sleep 1
+	done
+
+	(
+	sleep 25
+
+	echo "===============================================" >> "$LOG"
+	echo "autoprobe 开始 $(date)" >> "$LOG"
+	snapshot >> "$LOG" 2>/dev/null
+
+	for m in $MODES; do
+		echo "" >> "$LOG"
+		echo "---------- 尝试模式: $m ----------" >> "$LOG"
+		echo "$m" > "$D/line_mode" 2>/dev/null
+		ip link set pon0 down 2>/dev/null
+		sleep 1
+		ip link set pon0 up 2>/dev/null
+		sleep 22
+		snapshot >> "$LOG" 2>/dev/null
+
+		# 只有明确出现 xgtc_sync: in-sync 才算锁上。
+		# 注意：gpon 模式下 pcs 里根本没有 xgtc_sync 字段，若用"不是 hunt"
+		# 判断会把 gpon 误判成锁上（曾经因此把模式错误地改成 gpon）。
+		if grep -q "xgtc_sync: in-sync" "$D/pcs" 2>/dev/null; then
+			echo "*** 模式 $m 锁上了，停止探测 ***" >> "$LOG"
+			echo "$m" > /mnt/persist/pon-mode-found
+			uci set pon.line0.mode="$m"
+			uci commit pon
+			sync
+			break
+		fi
+	done
+
+	echo "" >> "$LOG"
+	echo "autoprobe 结束 $(date)" >> "$LOG"
+	sync
+	) &
+}

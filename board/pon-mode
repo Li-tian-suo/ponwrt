@@ -1,0 +1,76 @@
+#!/bin/sh
+# 运行时切换 PON 线路模式，用于现场判断线路类型。
+#
+#   pon-mode                → 显示当前模式和可选值
+#   pon-mode xgspon         → 切到 XGS-PON 并重新拉起 pon0
+#
+# 可选：gpon / xgpon / xgspon / epon-1g / epon-10g-1g / epon-10g-10g
+#
+# 国内线路常见：
+#   GPON（下行 2.5G/上行 1.25G）        → gpon
+#   XG-PON（下行 10G/上行 2.5G）        → xgpon
+#   XGS-PON（上下行对称 10G）           → xgspon
+#   10G-EPON                            → epon-10g-10g / epon-10g-1g
+
+D=/sys/kernel/debug/airoha-xpon-pon0
+
+# debugfs 必须可用（开机早期可能还没挂）
+[ -d /sys/kernel/debug ] || mkdir -p /sys/kernel/debug
+mountpoint -q /sys/kernel/debug 2>/dev/null || mount -t debugfs none /sys/kernel/debug 2>/dev/null
+
+
+MODES="gpon xgpon xgspon epon-1g epon-10g-1g epon-10g-10g"
+
+if [ -z "$1" ]; then
+	echo "当前配置模式："
+	sed -n 's/^configured_mode: /  /p' "$D/line" 2>/dev/null
+	echo "当前活动模式："
+	sed -n 's/^active_mode: /  /p' "$D/line" 2>/dev/null
+	echo
+	echo "可选：$MODES"
+	echo "用法：pon-mode <模式名>"
+	exit 0
+fi
+
+case " $MODES " in
+*" $1 "*) ;;
+*)
+	echo "不支持的模式：$1"
+	echo "可选：$MODES"
+	exit 1
+	;;
+esac
+
+if [ ! -w "$D/line_mode" ]; then
+	echo "错误：$D/line_mode 不存在（内核没有打 line_mode 补丁？）"
+	exit 1
+fi
+
+echo "$1" > "$D/line_mode" || {
+	echo "写入失败"
+	exit 1
+}
+
+# 重新拉起 PON 接口。
+# 注意：镜像默认配置里没有 pon0 这个 UCI 接口，所以不能用 ifdown/ifup，
+# 必须直接用 ip link（驱动的 ndo_open 才会真正初始化 PCS/PMA）。
+pon_restart() {
+	if command -v ifstatus >/dev/null 2>&1 && ifstatus pon0 >/dev/null 2>&1; then
+		ifdown pon0 2>/dev/null
+		sleep 1
+		ifup pon0 2>/dev/null
+	else
+		ip link set pon0 down 2>/dev/null
+		sleep 1
+		ip link set pon0 up 2>/dev/null
+	fi
+}
+
+echo "已切换到 $1，正在重新拉起 pon0 ..."
+pon_restart
+sleep 8
+
+echo
+echo "当前状态："
+sed -n 's/^\(configured_mode\|active_mode\|lifecycle\|optical_signal\|xgtc_sync\|onu_state\|onu_id\): /  \1: /p' \
+	"$D/line" "$D/pcs" "$D/registration" 2>/dev/null

@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# HG5380A 复位键策略（覆写 OpenWrt 默认的 /etc/rc.button/reset）
+#
+#   released) 按住 < 1 秒  → 重启
+#            按住 ≥ 10 秒 → 恢复出厂设置并重启
+#             1 ~ 10 秒   → 什么都不做（安全区）
+#
+# 默认阈值是 5 秒，对一台已经配置好的机器来说误触风险太大
+# （本机实测按 5 秒就直接进了 FACTORY RESET）。
+#
+# 注意：本机的 /etc/config 绑在 ext4 分区上，而 factoryreset 只清
+# /overlay（RAM overlay），所以恢复出厂后管理地址和密码依然保留。
+
+. /lib/functions.sh
+
+OVERLAY="$( grep ' /overlay ' /proc/mounts )"
+
+case "$ACTION" in
+pressed)
+	[ -z "$OVERLAY" ] && return 0
+	return 10
+;;
+timeout)
+	. /etc/diag.sh
+	set_state failsafe
+;;
+released)
+	if [ "$SEEN" -lt 1 ]; then
+		echo "REBOOT" > /dev/console
+		sync
+		reboot
+	elif [ "$SEEN" -ge 10 -a -n "$OVERLAY" ]; then
+		echo "FACTORY RESET" > /dev/console
+		factoryreset -y && reboot &
+	fi
+;;
+esac
+
+return 0
