@@ -57,14 +57,22 @@ jobs:
           fi
           grep -n "fiberhome_hg5380a" target/linux/airoha/image/an7583.mk | head
 
-      - name: Trim feeds (minimal)
+      - name: Trim feeds
         env:
           PROFILE: ${{ inputs.profile || 'minimal' }}
         run: |
-          # openwrt/video 里的 qt5 有 Kconfig 递归依赖，最小版不需要它
-          if [ "$PROFILE" = "minimal" ]; then
-            sed -i '/^src-git video /d' feeds.conf.default
-          fi
+          # 两个档位都删掉对 HG5380A 完全无用的 feed。
+          #
+          # 已核实：minimal 档选中 16 个包、full 档 138 个包，
+          # 其中没有任何一个来自 video 或 telephony —— 这台设备是纯
+          # 路由/PON 网关，既不播视频也不用 Asterisk。
+          #
+          # video    : 含 qt5，有已知的 Kconfig 递归依赖（原注释记的就是这个）
+          # telephony: 含 asterisk/freeswitch 等，体量大且用不到
+          #
+          # 删掉后能减少克隆体积，也让 make defconfig 少解析大量无关 Kconfig。
+          sed -i '/^src-git video /d; /^src-git telephony /d' feeds.conf.default
+          echo "profile = $PROFILE"
           cat feeds.conf.default
 
       - name: Fix exec bits
