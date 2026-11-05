@@ -1,0 +1,346 @@
+name: Build HG5580A (AN7583 FiberHome)
+
+# HG5580A = HG5380A 的同门型号：同为 Airoha AN7583，同款 FORESEE F35SQB002G NAND，
+# 2.5G PHY 实测同为 Motorcomm YT8821（MDIO 0x07，ID 0x4f51ea19）。
+#
+# 与 HG5380A 的实测差异：
+#   - 光模块 BOSA 在 i2c0 0x51（XEPON_10G_1G，SerDes 走 xpon_usxgmii）
+#   - reset 键在 U-Boot 里读到的是死电平（与 5380A 当年现象一致），
+#     DTS 沿用 GPIO35，上机后须用 /proc/interrupts 复核
+#
+# 关于启动链（重要，不要被旧注释带偏）：
+#   厂商 bootcmd = ldkernel;bargsenv;bootm。
+#   **不需要替换 U-Boot，也不需要 HDR2 包装。**
+#   HG5380A 已证明：把裸 FIT 直接写到 KernelB 开头就能启动。
+#
+#   下面的 "Assemble U-Boot FIP" 步骤是 **永久的空操作**：
+#   package/boot/uboot-airoha/Makefile 只定义了 an7581_*、
+#   an7583_nokia_*、an7583_rfb，**没有 fiberhome 目标**，
+#   所以 IMG/an7583_hg5580a-u-boot.lzma 永远不会出现，fiptool 那几行总是失败。
+#   保留它只是为了不让 CI 因为找不到文件而整体报错；它产不出任何可用产物。
+#
+#   决定性的证据：已完整备份 mtd0（bootloader 2,621,440 B）里
+#   **没有** U-Boot 2023.04 字符串，U-Boot 体本身在 FIP 里被 LZMA 压缩；
+#   且写 bootloader 是这台机器上唯一不可逆的操作。没有必要就绝不要碰。
+#
+# 前置：board/ 目录下需有
+#   board/an7583-fiberhome-hg5580a.dts
+#   board/hg5580a.mk.snippet
+#   configs/hg5580a-packages.config
+#
+# 不需要 board/04_pon_data_hg5580a。这个文件存在，但本板**不应该**安装它，
+# 尤其不要为了“补齐”而加一个 cp 过去：
+#
+#   * 本板的 BOSA 校准走的是设备树里声明的 nvmem-cells（bosacal /
+#     identity 两个分区），内核直接按偏移读；
+#   * 而 03_pon_data 里那些 pon_data_target 分支处理的是“校准数据在 UBI
+#     卷里”或“在裸 mtd 分区里，需要运行时描述”的板子（hg5382a、
+#     nokia xg-040g 系列等），与本板方案互斥；
+#   * 两份描述同时生效会让 pon_data 对象里出现两套冲突的定位。
+#
+# HG5380A 同样不安装 04_pon_data_hg5380a，它也是这么跑的。
+on:
+  push:
+    branches:
+      - master
+      - Ponwrt-5380A
+    paths:
+      - 'board/**'
+      - 'configs/hg5580a-packages.config'
+      - 'target/linux/airoha/**'
+      - '.github/workflows/build-hg5580a.yml'
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: '构建档位：minimal=最小验证版（推荐首次），full=完整包集合'
+        type: choice
+        options:
+          - minimal
+          - full
+        default: minimal
+
+# 同一分支只保留最新一次构建（一次全量编译 60~120 分钟）。
+concurrency:
+  group: hg5580a-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget
+
+      # ------------------------------------------------------------------
+      # 板级文件就位
+      #
+      # 关键：image/Makefile 里是 DEVICE_DTS_DIR := ../dts，
+      # 编译器只去 target/linux/airoha/dts/ 找 an7583-fiberhome-hg5580a.dts，
+      # board/ 下那份不会被用到，必须 cp 过去。
+      # ------------------------------------------------------------------
+      - name: Apply board files
+        run: |
+          test -f board/an7583-fiberhome-hg5580a.dts
+          cp board/an7583-fiberhome-hg5580a.dts target/linux/airoha/dts/
+
+          # 仓库自带的 an7583.mk 里可能已有 Device/fiberhome_hg5580a（本地开发时追加的），
+          # 先精确删掉，再 cat snippet，避免重复注册 TARGET_DEVICES。
+          python3 - <<'PY'
+          import re, pathlib, sys
+          p = pathlib.Path('target/linux/airoha/image/an7583.mk')
+          s = p.read_text()
+
+          # Count the pieces BEFORE touching anything. A "define" without its
+          # matching TARGET_DEVICES line (or the reverse) means the file is not
+          # in the shape this script expects. Guessing would append a second
+          # definition and register the device twice, which only surfaces much
+          # later as a confusing duplicate-target error.
+          n_def  = len(re.findall(r'^define Device/fiberhome_hg5580a\b', s, re.M))
+          n_td   = len(re.findall(r'^TARGET_DEVICES \+= fiberhome_hg5580a\b', s, re.M))
+          pat = re.compile(
+              r'define Device/fiberhome_hg5580a\n(?:.*?\n)*?endef\n'
+              r'TARGET_DEVICES \+= fiberhome_hg5580a\n'
+          )
+          n_full = len(pat.findall(s))
+          print('before: define=%d TARGET_DEVICES=%d full-blocks=%d'
+                % (n_def, n_td, n_full))
+
+          if not (n_def == n_td == n_full):
+              sys.exit('ERROR: an7583.mk has a half-formed hg5580a block '
+                       '(define=%d TARGET_DEVICES=%d full=%d) - refusing to guess'
+                       % (n_def, n_td, n_full))
+
+          new, n = pat.subn('', s)
+          if n:
+              p.write_text(new)
+          print('removed %d pre-existing block(s)' % n)
+
+          if re.search(r'^define Device/fiberhome_hg5580a\b', new, re.M):
+              sys.exit('ERROR: an hg5580a define survived removal')
+          PY
+
+          cat board/hg5580a.mk.snippet >> target/linux/airoha/image/an7583.mk
+
+          echo "--- 应用后的 hg5580a device 定义 ---"
+          sed -n '/define Device\/fiberhome_hg5580a/,/^TARGET_DEVICES += fiberhome_hg5580a/p' \
+            target/linux/airoha/image/an7583.mk
+
+          # kmod-airoha-paged-bosa 只对 TARGET_airoha_an7581 可见，
+          # AN7583 下没有这个符号，出现即说明抄错了块。
+          if sed -n '/define Device\/fiberhome_hg5580a/,/^TARGET_DEVICES += fiberhome_hg5580a/p' \
+               target/linux/airoha/image/an7583.mk | grep -q 'paged-bosa'; then
+            echo "::error::hg5580a 块里出现 paged-bosa，该包只对 AN7581 可见"
+            exit 1
+          fi
+
+          # After appending, there must be exactly one definition. Zero means
+          # the snippet never landed; more than one means residue survived.
+          # Either way the build must not continue.
+          n_after=$(grep -c '^define Device/fiberhome_hg5580a$' \
+                      target/linux/airoha/image/an7583.mk || true)
+          n_td_after=$(grep -c '^TARGET_DEVICES += fiberhome_hg5580a$' \
+                      target/linux/airoha/image/an7583.mk || true)
+          echo "after append: define=$n_after TARGET_DEVICES=$n_td_after"
+          if [ "$n_after" != "1" ] || [ "$n_td_after" != "1" ]; then
+            echo "::error::hg5580a definition count is wrong (define=$n_after TARGET_DEVICES=$n_td_after), expected exactly 1 each"
+            exit 1
+          fi
+          # DTS 就位校验
+          test -f target/linux/airoha/dts/an7583-fiberhome-hg5580a.dts
+          echo "DTS in place: $(wc -c < target/linux/airoha/dts/an7583-fiberhome-hg5580a.dts) bytes"
+
+      - name: Trim feeds
+        env:
+          PROFILE: ${{ inputs.profile || 'minimal' }}
+        run: |
+          # 纯路由/PON 网关，不播视频也不用 Asterisk
+          sed -i '/^src-git video /d; /^src-git telephony /d' feeds.conf.default
+          echo "profile = $PROFILE"
+          cat feeds.conf.default
+
+      - name: Fix exec bits
+        run: |
+          chmod +x scripts/* config/* 2>/dev/null || true
+          find . -maxdepth 3 -name '*.sh' -not -path './build_dir/*' -not -path './staging_dir/*' -exec chmod +x {} + 2>/dev/null || true
+          ls -l scripts/feeds config/check-uname.sh 2>/dev/null || true
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      - name: Provide libffi
+        run: |
+          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
+          git -C /tmp/owrt sparse-checkout set package/libs/libffi
+          mkdir -p package/libs
+          cp -a /tmp/owrt/package/libs/libffi package/libs/
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Drop packages with Kconfig recursion
+        run: |
+          for d in feeds/packages/net/fwknop \
+                   feeds/packages/sound/squeezelite \
+                   feeds/luci/applications/luci-app-fwknopd; do
+            if [ -e "$d" ]; then rm -rf "$d"; echo "removed $d"
+            else echo "absent  $d"; fi
+          done
+          rm -rf package/feeds/packages/fwknop \
+                 package/feeds/packages/squeezelite \
+                 package/feeds/luci/luci-app-fwknopd 2>/dev/null || true
+
+      - name: Configure
+        env:
+          PROFILE: ${{ inputs.profile || 'minimal' }}
+        run: |
+          echo "profile = $PROFILE"
+          if [ "$PROFILE" = "full" ]; then
+            cp configs/an7583.config .config
+            sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
+            echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5580a=y' >> .config
+            if [ -f configs/hg5580a-packages.config ]; then
+              grep '^CONFIG_PACKAGE_' configs/hg5580a-packages.config >> .config || true
+            fi
+          else
+            # 最小验证版：保留 target/内核元数据，去掉所有已选软件包
+            cp configs/an7583.config .config
+            grep -v '^CONFIG_PACKAGE_[A-Za-z0-9_.-]*=y$' .config > .config.trim || true
+            mv .config.trim .config
+            sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
+            echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5580a=y' >> .config
+            cat >> .config <<'EOF'
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_htop=y
+          # CONFIG_PACKAGE_luci-app-fwknopd is not set
+          # CONFIG_PACKAGE_squeezelite-custom is not set
+          EOF
+            sed -i 's/^ *//' .config
+          fi
+
+          # 板级驱动与 PON 组件。
+          # 注意：本仓库里「设备级 DEVICE_PACKAGES 不生效」，必须在这显式列 CONFIG_PACKAGE_*。
+          #
+          #   kmod-phy-motorcomm        - 本机 2.5G PHY 是 YT8821（MDIO 0x07）
+          #   kmod-phy-airoha-en8811h   - GSW 内部 PHY（gsw_phy2..4 -> lan2..lan4）
+          #   kmod-airoha-en7572        - AN7583 的 PON 前端
+          #   kmod-airoha-xpon          - XPON 协议栈
+          #   airoha-ponctl / airoha-pond - PON 控制与守护进程
+          #
+          # 绝对不要加 kmod-airoha-paged-bosa：该包 DEPENDS:=@TARGET_airoha_an7581，
+          # AN7583 下没有这个符号，打包会报 "(no such package)"。
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_kmod-phy-motorcomm=y
+          CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-en7572=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
+          CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_airoha-en8811h-firmware=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          EOF
+          sed -i 's/^ *//' .config
+
+          make defconfig
+          echo "--- device selection ---"
+          grep -E '^CONFIG_TARGET_DEVICE_airoha' .config | grep '=y' || {
+            echo "设备未被选中，请检查 an7583.mk 里的设备名"; exit 1; }
+          echo "--- package count ---"
+          grep -c '^CONFIG_PACKAGE_.*=y' .config || true
+
+      - name: Download sources
+        run: make download -j8 || true
+
+      - name: Compile
+        run: make -j$(nproc) || (make -j1 V=s 2>&1 | tail -n 300; false)
+
+      # ------------------------------------------------------------------
+      # 组装 U-Boot FIP。
+      #
+      # HG5580A 原厂 bootcmd 是 ldkernel;bargsenv;bootm，ldkernel 会解析厂商
+      # 的 HDR2 签名容器，裸 FIT 写进去不会被识别。所以和 HG5380A 一样：
+      # 用 PonWRT 自己的 U-Boot 替换原厂 bootloader。
+      #
+      # 需要 board/hg5580a.mk.snippet 里给 U-Boot 包提供 an7583_hg5580a-* 的命名；
+      # 若产物名不存在，这一步会跳过（continue-on-error），
+      # 此时请改为只刷 KernelB/RootfsB 并用 mtd read + bootm 手动启动验证。
+      # ------------------------------------------------------------------
+      - name: Assemble U-Boot FIP (best effort)
+        continue-on-error: true
+        run: |
+          if [ ! -x staging_dir/host/bin/fiptool ]; then
+            git clone --depth 1 https://github.com/ARM-software/arm-trusted-firmware /tmp/atf || true
+            make -C /tmp/atf/tools/fiptool BUILD_DIR=/tmp/atf/build -j"$(nproc)" || true
+            FIP=$(find /tmp/atf -type f -name fiptool -perm -u+x 2>/dev/null | head -1)
+            echo "found fiptool: ${FIP:-none}"
+            [ -n "$FIP" ] && cp "$FIP" staging_dir/host/bin/fiptool || true
+          fi
+          ls -l staging_dir/host/bin/fiptool || true
+          IMG="staging_dir/target-aarch64_cortex-a53_musl/image"
+          ls -l "$IMG" | head -30 || true
+          if [ -f "$IMG/an7583-bl2.bin" ]; then
+            staging_dir/host/bin/fiptool create --tb-fw "$IMG/an7583-bl2.bin" \
+              "$IMG/an7583_hg5580a-bl2.fip" && \
+              cp "$IMG/an7583_hg5580a-bl2.fip" bin/targets/airoha/an7583/preloader.bin
+          fi
+          if [ -f "$IMG/an7583-bl31.lzma" ] && [ -f "$IMG/an7583_hg5580a-u-boot.lzma" ]; then
+            staging_dir/host/bin/fiptool create --soc-fw "$IMG/an7583-bl31.lzma" \
+              --nt-fw "$IMG/an7583_hg5580a-u-boot.lzma" "$IMG/an7583_hg5580a-bl31-u-boot.fip" && \
+              cp "$IMG/an7583_hg5580a-bl31-u-boot.fip" bin/targets/airoha/an7583/bl31-uboot.fip
+          fi
+          ls -l bin/targets/airoha/an7583/ || true
+
+      - name: List artifacts
+        if: always()
+        run: find bin/targets/airoha/an7583 -maxdepth 1 -type f -printf '%f  %s\n' 2>/dev/null || true
+
+      - name: Verify firmware was produced
+        run: |
+          IMG=bin/targets/airoha/an7583
+          echo "--- $IMG 下的文件 ---"
+          ls -l "$IMG" 2>/dev/null || true
+          N=$(find "$IMG" -maxdepth 1 -type f -name '*sysupgrade*' 2>/dev/null | wc -l)
+          echo "sysupgrade 镜像数量: $N"
+          if [ "$N" -eq 0 ]; then
+            echo "::error::没有生成任何 sysupgrade 镜像，构建虽然返回 0 但产物缺失"
+            exit 1
+          fi
+          find "$IMG" -maxdepth 1 -type f -name '*sysupgrade*' -printf '  %f  %s 字节\n'
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hg5580a-${{ inputs.profile || 'minimal' }}
+          if-no-files-found: warn
+          path: |
+            bin/targets/airoha/an7583/*sysupgrade*
+            bin/targets/airoha/an7583/preloader.bin
+            bin/targets/airoha/an7583/*.fip
+            bin/targets/airoha/an7583/*.itb
+            bin/targets/airoha/an7583/*.manifest
+            bin/targets/airoha/an7583/config.buildinfo

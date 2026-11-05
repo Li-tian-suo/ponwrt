@@ -117,3 +117,29 @@ define Device/fiberhome_hg5380a
 		pad-rootfs | append-metadata
 endef
 TARGET_DEVICES += fiberhome_hg5380a
+
+define Device/fiberhome_hg5580a
+	# 原厂 U-Boot 2023.04 的 LZMA 解码器解不了 OpenWrt 产出的 lp=2 数据流
+	# （uncompress error 7），改用 gzip，兼容性最好。
+	KERNEL_SUFFIX := -uImage.itb
+	KERNEL = kernel-bin | gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
+	KERNEL_NAME := Image
+	DEVICE_VENDOR := FiberHome
+	DEVICE_MODEL := HG5580A
+	DEVICE_DTS := an7583-fiberhome-hg5580a
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	KERNEL_SIZE := 6144k
+	# 注意：绝对不要加 kmod-airoha-paged-bosa。该包在 openwrt-pon-drivers 里
+	# 声明为 DEPENDS:=@TARGET_airoha_an7581，AN7583 下根本不存在这个符号，
+	# 打包会直接报 "kmod-airoha-paged-bosa (no such package)"。
+	# 本机 2.5G PHY 是 Motorcomm YT8821（MDIO 0x07，ID 0x4f51ea19），
+	# DTS 里用 ethernet-phy-ieee802.3-c22 通用绑定，带 motorcomm 驱动更稳。
+	DEVICE_PACKAGES := kmod-phy-motorcomm \
+		kmod-airoha-en7572 kmod-airoha-xpon \
+		airoha-ponctl airoha-pond
+	IMAGES := sysupgrade.bin
+	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
+		pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += fiberhome_hg5580a
