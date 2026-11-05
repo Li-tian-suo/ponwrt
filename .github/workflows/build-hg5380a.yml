@@ -1,4 +1,4 @@
-﻿name: Build HG5380A (AN7583 FiberHome)
+name: Build HG5380A (AN7583 FiberHome)
 
 # 适配 Li-tian-suo/ponwrt（pbs05/ponwrt 的 fork）
 # 前置：仓库里需要有 board/ 目录（本包提供的两个文件）
@@ -79,6 +79,30 @@ jobs:
 
       - name: Install feeds
         run: ./scripts/feeds install -a
+
+      - name: Drop packages with Kconfig recursion
+        # 这两组包在 feeds 的 Kconfig 里互相 select，触发 kconfig 的
+        # "recursive dependency detected!"：
+        #
+        #   PACKAGE_fwknopd 被 PACKAGE_luci-app-fwknopd select
+        #   PACKAGE_luci-app-fwknopd depends on FWKNOPD_GPG
+        #   FWKNOPD_GPG depends on PACKAGE_fwknopd
+        #
+        #   PACKAGE_squeezelite-custom depends on SQUEEZELITE_WMA_ALAC
+        #   SQUEEZELITE_WMA_ALAC depends on PACKAGE_squeezelite-custom
+        #
+        # 这不会中止 make defconfig，但 kconfig 明确提示递归时生成的 .config
+        # 可能不正确。两个档位都用不到这两个包，直接移除包目录从源头消除。
+        run: |
+          for d in feeds/packages/net/fwknop \
+                   feeds/packages/sound/squeezelite \
+                   feeds/luci/applications/luci-app-fwknopd; do
+            if [ -e "$d" ]; then rm -rf "$d"; echo "removed $d"
+            else echo "absent  $d"; fi
+          done
+          rm -rf package/feeds/packages/fwknop \
+                 package/feeds/packages/squeezelite \
+                 package/feeds/luci/luci-app-fwknopd 2>/dev/null || true
 
       - name: Configure
         env:
