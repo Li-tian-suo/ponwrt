@@ -113,8 +113,8 @@ jobs:
             cp configs/an7583.config .config
             sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
             echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y' >> .config
-            if [ -f configs/an7581-tyfza1-packages.config ]; then
-              grep '^CONFIG_PACKAGE_' configs/an7581-tyfza1-packages.config >> .config || true
+            if [ -f configs/hg5380a-packages.config ]; then
+              grep '^CONFIG_PACKAGE_' configs/hg5380a-packages.config >> .config || true
             fi
           else
             # 最小验证版：用已知可用的 an7583.config 打底（保留 target/内核元数据），

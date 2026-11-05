@@ -26,11 +26,11 @@ jobs:
       - name: Configure and report
         run: |
           cp configs/an7581.config .config
-          cat configs/an7581-tyfza1-packages.config >> .config
+          cat configs/hg5380a-packages.config >> .config
           make defconfig
           echo "=== selected python3 symbols ==="
           grep -E '^CONFIG_PACKAGE_python3' .config || true
           echo "=== fragment python3 lines ==="
-          grep -n 'python3' configs/an7581-tyfza1-packages.config || true
+          grep -n 'python3' configs/hg5380a-packages.config || true
           echo "=== who selects python3 (kconfig depends) ==="
           grep -n -B2 -A2 'PACKAGE_python3\b' tmp/.config-package.in | head -n 60 || true
