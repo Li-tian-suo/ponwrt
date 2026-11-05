@@ -52,10 +52,45 @@ jobs:
         run: |
           test -f board/an7583-fiberhome-hg5380a.dts
           cp board/an7583-fiberhome-hg5380a.dts target/linux/airoha/dts/
-          if ! grep -q fiberhome_hg5380a target/linux/airoha/image/an7583.mk; then
-            cat board/an7583.mk.snippet >> target/linux/airoha/image/an7583.mk
+
+          # 仓库自带的 an7583.mk 里已经有一份 Device/fiberhome_hg5380a，
+          # 但它的 DEVICE_PACKAGES 是从 AN7581 抄来的，含 kmod-airoha-paged-bosa。
+          # 该包在 openwrt-pon-drivers 里的声明是：
+          #     DEPENDS:=@TARGET_airoha_an7581 +kmod-airoha-pon-frontend
+          # 即只对 AN7581 可见，AN7583 下根本不存在这个符号。结果镜像打包时报：
+          #     ERROR: unable to select packages:
+          #       kmod-airoha-paged-bosa (no such package)
+          # AN7583 用的是 EN7572 前端，正确的 DEVICE_PACKAGES 在 snippet 里。
+          #
+          # 原来的写法是 `if ! grep -q fiberhome_hg5380a ...; then 追加`，
+          # 因为旧定义已经存在，grep 命中，snippet 永远不会被追加。
+          # 改为：先精确删掉旧块（含 TARGET_DEVICES 行，避免重复注册），再追加。
+          python3 - <<'PY'
+          import re, pathlib, sys
+          p = pathlib.Path('target/linux/airoha/image/an7583.mk')
+          s = p.read_text()
+          pat = re.compile(
+              r'define Device/fiberhome_hg5380a\n(?:.*?\n)*?endef\n'
+              r'TARGET_DEVICES \+= fiberhome_hg5380a\n'
+          )
+          new, n = pat.subn('', s, count=1)
+          if n != 1:
+              sys.exit('ERROR: 未找到旧的 Device/fiberhome_hg5380a 定义，'
+                       '请检查 an7583.mk 结构是否变化')
+          p.write_text(new)
+          print('removed old Device/fiberhome_hg5380a block')
+          PY
+
+          cat board/an7583.mk.snippet >> target/linux/airoha/image/an7583.mk
+
+          echo "--- 应用后的 device 定义 ---"
+          sed -n '/define Device\/fiberhome_hg5380a/,/^TARGET_DEVICES += fiberhome_hg5380a/p' \
+            target/linux/airoha/image/an7583.mk
+          echo "--- 不应再出现 paged-bosa ---"
+          if grep -q 'paged-bosa' target/linux/airoha/image/an7583.mk; then
+            echo "::error::an7583.mk 里仍有 paged-bosa，该包只对 AN7581 可见"
+            exit 1
           fi
-          grep -n "fiberhome_hg5380a" target/linux/airoha/image/an7583.mk | head
 
       - name: Trim feeds
         env:
