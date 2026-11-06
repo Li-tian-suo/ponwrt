@@ -60,6 +60,10 @@ jobs:
           echo "CONFIG_PACKAGE_luci-app-advanced=y" >> $CONF
           echo "CONFIG_PACKAGE_luci-app-arpbind=y" >> $CONF
           echo "CONFIG_PACKAGE_nano=y" >> $CONF
+          # Homebox 内网测速：包体在 package/homebox（预编译 aarch64-musl 静态二进制），
+          # configs/an7581.config 里也已写入 CONFIG_PACKAGE_homebox=y，这里再写一次，
+          # 保证即使 an7581.config 被上游覆盖也能带上。
+          echo "CONFIG_PACKAGE_homebox=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-core=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb-net=y" >> $CONF
           echo "CONFIG_PACKAGE_kmod-usb3=y" >> $CONF
@@ -138,6 +142,25 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Verify Homebox
+        run: |
+          # 包目录必须在，否则 make defconfig 会静默丢弃 CONFIG_PACKAGE_homebox=y
+          if [ ! -f package/homebox/Makefile ]; then
+            echo "ERROR: package/homebox/Makefile 不存在"
+            exit 1
+          fi
+          if [ ! -s package/homebox/files/homebox ]; then
+            echo "ERROR: package/homebox/files/homebox 缺失或为空"
+            exit 1
+          fi
+          if ! grep -q "^CONFIG_PACKAGE_homebox=y" .config; then
+            echo "ERROR: .config 里没有 CONFIG_PACKAGE_homebox=y（被 defconfig 丢弃了）"
+            grep -i homebox .config || true
+            exit 1
+          fi
+          echo "OK: homebox 已在 .config 中"
+          echo "二进制大小: $(stat -c%s package/homebox/files/homebox) B"
 
       - name: Download Sources
         run: make download -j8
