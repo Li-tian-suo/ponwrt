@@ -1,0 +1,49 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: HG5580A port <port@localhost>
+Date: Thu, 6 Nov 2026 20:09:00 +0800
+Subject: [PATCH] cmake: do not promote unused-symbol warnings to errors
+
+libubox hardcodes -Werror in two independent places, and ADD_DEFINITIONS
+appends to the compile line *after* the flags OpenWrt passes via
+TARGET_CFLAGS. That means a -Wno-error=... in the package Makefile is
+always overridden by the later -Werror, so the only reliable fix is to
+remove it at the source:
+
+  CMakeLists.txt:7      ADD_DEFINITIONS(-Wall -Werror)
+  lua/CMakeLists.txt:9  ADD_DEFINITIONS(-Os -Wall -Werror --std=gnu99 ...)
+
+The second one is what actually compiles lua/uloop.c.
+
+With GCC 13/14 (Ubuntu 24.04) that file now trips -Wunused-function and
+-Wunused-const-variable for symbols that are only reachable when a newer
+Lua API is detected, so the build aborts with
+"cc1: all warnings being treated as errors". GCC 12 (the CI image) did not
+diagnose those cases, which is why this fails only locally.
+
+Targeted -Werror=... options for real defects (implicit-function-declaration,
+format-security) are deliberately kept.
+
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -4,7 +4,7 @@
+ 
+ PROJECT(ubox C)
+ 
+-ADD_DEFINITIONS(-Wall -Werror)
++ADD_DEFINITIONS(-Wall)
+ IF(CMAKE_C_COMPILER_VERSION VERSION_GREATER 6)
+ 	ADD_DEFINITIONS(-Wextra -Werror=implicit-function-declaration)
+ 	ADD_DEFINITIONS(-Wformat -Werror=format-security)
+--- a/lua/CMakeLists.txt
++++ b/lua/CMakeLists.txt
+@@ -6,7 +6,7 @@
+ 	pkg_search_module(LUA lua5.1 lua-5.1)
+ ENDIF()
+ 
+-ADD_DEFINITIONS(-Os -Wall -Werror --std=gnu99 -g3 -I.. ${LUA_CFLAGS})
++ADD_DEFINITIONS(-Os -Wall --std=gnu99 -g3 -I.. ${LUA_CFLAGS})
+ LINK_DIRECTORIES(${CMAKE_CURRENT_SOURCE_DIR}/..)
+ 
+ IF(APPLE)
+-- 
+2.43.0

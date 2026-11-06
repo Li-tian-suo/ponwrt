@@ -68,8 +68,20 @@ endef
 
 TARGET_CFLAGS += -I$(STAGING_DIR)/usr/include
 CMAKE_OPTIONS += \
-	-DLUAPATH=/usr/lib/lua \
 	-DABIVERSION="$(PKG_ABI_VERSION)"
+
+# 上游 CMakeLists.txt 里 BUILD_LUA 默认是 ON，但 libubox-lua 这个子包
+# 在没被选中（CONFIG_PACKAGE_libubox-lua 未设）时根本不会安装产物。
+# 若不关掉，lua/uloop.c 仍会被编译，而它依赖 lua5.1 的 pkg-config 元数据
+# （lua/CMakeLists.txt 里 pkg_search_module(LUA lua5.1 lua-5.1)）；
+# 目标 staging 里只有 lua.pc，查找失败后 LUA_CFLAGS 为空，
+# 编译直接报 "unknown type name 'lua_State'"。
+# 没有选中子包时明确关闭，既省编译又避开这个依赖陷阱。
+ifneq ($(CONFIG_PACKAGE_libubox-lua),y)
+  CMAKE_OPTIONS += -DBUILD_LUA=OFF
+else
+  CMAKE_OPTIONS += -DLUAPATH=/usr/lib/lua
+endif
 
 define Package/libubox/install
 	$(INSTALL_DIR) $(1)/lib/
