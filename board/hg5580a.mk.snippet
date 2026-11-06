@@ -21,13 +21,25 @@ define Device/fiberhome_hg5580a
 	BLOCKSIZE := 128k
 	PAGESIZE := 2048
 	KERNEL_SIZE := 6144k
-	# 注意：绝对不要加 kmod-airoha-paged-bosa。该包在 openwrt-pon-drivers 里
-	# 声明为 DEPENDS:=@TARGET_airoha_an7581，AN7583 下根本不存在这个符号，
-	# 打包会直接报 "kmod-airoha-paged-bosa (no such package)"。
+	# 本机光模块是 UX3363（bosacal 分区里的 table 明确写着 ux3363），
+	# 只有 kmod-airoha-paged-bosa 里的 airoha-paged-bosa-ux3363.c 能驱动它。
+	#
+	# 上游 openwrt-pon-drivers 的 airoha-pon-frontends/Makefile 里，
+	# airoha-pon-frontend 与 airoha-en7572 的 DEPENDS 都写着
+	#   @(TARGET_airoha_an7581||TARGET_airoha_an7583)
+	# 唯独 airoha-paged-bosa 只写 @TARGET_airoha_an7581，于是 AN7583 下
+	# 这个包不可见、选不中、不进镜像，DTS 里的 BOSA 节点无人绑定，
+	# airoha-xpon 在 airoha_pon_frontend_get() 处拿不到 provider，
+	# probe 直接失败，pon0 根本不出现。
+	# 由 board/airoha-paged-bosa-an7583.patch 在 feeds update 之后修正。
+	#
+	# en7572 保留：若某台机器换装 EN7572 前端，两个驱动并存不冲突，
+	# 各自按 compatible 匹配。
+	#
 	# 本机 2.5G PHY 是 Motorcomm YT8821（MDIO 0x07，ID 0x4f51ea19），
 	# DTS 里用 ethernet-phy-ieee802.3-c22 通用绑定，带 motorcomm 驱动更稳。
 	DEVICE_PACKAGES := kmod-phy-motorcomm \
-		kmod-airoha-en7572 kmod-airoha-xpon \
+		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
 		airoha-ponctl airoha-pond
 	IMAGES := sysupgrade.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \

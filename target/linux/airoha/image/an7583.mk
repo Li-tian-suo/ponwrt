@@ -130,13 +130,18 @@ define Device/fiberhome_hg5580a
 	BLOCKSIZE := 128k
 	PAGESIZE := 2048
 	KERNEL_SIZE := 6144k
-	# 注意：绝对不要加 kmod-airoha-paged-bosa。该包在 openwrt-pon-drivers 里
-	# 声明为 DEPENDS:=@TARGET_airoha_an7581，AN7583 下根本不存在这个符号，
-	# 打包会直接报 "kmod-airoha-paged-bosa (no such package)"。
+	# 本机光模块是 UX3363（bosacal 分区的 table 写着 ux3363），
+	# 只有 kmod-airoha-paged-bosa 里的 airoha-paged-bosa-ux3363.c 能驱动它。
+	#
+	# 上游 feed 给 airoha-paged-bosa 的 DEPENDS 只写了 @TARGET_airoha_an7581，
+	# AN7583 下选不中，由 board/airoha-paged-bosa-an7583.patch 修正。
+	# 不加这个包，DTS 的 BOSA 节点无人绑定，airoha-xpon 的 probe 会失败，
+	# pon0 根本不出现。
+	#
 	# 本机 2.5G PHY 是 Motorcomm YT8821（MDIO 0x07，ID 0x4f51ea19），
 	# DTS 里用 ethernet-phy-ieee802.3-c22 通用绑定，带 motorcomm 驱动更稳。
 	DEVICE_PACKAGES := kmod-phy-motorcomm \
-		kmod-airoha-en7572 kmod-airoha-xpon \
+		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
 		airoha-ponctl airoha-pond
 	IMAGES := sysupgrade.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \

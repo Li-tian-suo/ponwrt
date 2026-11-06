@@ -1,0 +1,14 @@
+--- a/airoha-pon-frontends/Makefile
++++ b/airoha-pon-frontends/Makefile
+@@ -45,7 +45,10 @@
+ define KernelPackage/airoha-paged-bosa
+   SUBMENU:=Network Devices
+   TITLE:=GN28L95 and UX3363 PON frontends
+-  DEPENDS:=@TARGET_airoha_an7581 +kmod-airoha-pon-frontend
++  # AN7583 与 AN7581 共用同一套前端代码，但上游这两个包的 DEPENDS 只写了
++  # AN7581（同一文件的 airoha-pon-frontend 与 airoha-en7572 都已补上 AN7583，
++  # 唯独本包漏掉），结果 AN7583 设备永远选不到它。
++  DEPENDS:=@(TARGET_airoha_an7581||TARGET_airoha_an7583) +kmod-airoha-pon-frontend
+   FILES:=$(PKG_BUILD_DIR)/airoha-paged-bosa.ko
+   AUTOLOAD:=$(call AutoProbe,airoha-paged-bosa)
+ endef

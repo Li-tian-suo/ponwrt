@@ -86,12 +86,14 @@ jobs:
           echo "--- 应用后的 device 定义 ---"
           sed -n '/define Device\/fiberhome_hg5380a/,/^TARGET_DEVICES += fiberhome_hg5380a/p' \
             target/linux/airoha/image/an7583.mk
-          echo "--- 不应再出现 paged-bosa（注释里的提醒除外）---"
-          # sed 先把注释剥掉再 grep：an7583.mk 的 hg5580a 块里有一行注释专门
-          # 写着「绝对不要加 kmod-airoha-paged-bosa」，直接 grep 整个文件会
-          # 命中那句注释，把正确的文件判成错的。
-          if sed 's/#.*//' target/linux/airoha/image/an7583.mk | grep -q 'paged-bosa'; then
-            echo "::error::an7583.mk 里仍有 paged-bosa 依赖，该包只对 AN7581 可见"
+          # kmod-airoha-paged-bosa 必须出现：本机光模块是 UX3363，
+          # 只有这个包里的 airoha-paged-bosa-ux3363.c 能驱动它。
+          # 上游 feed 给这个包的 DEPENDS 只写了 @TARGET_airoha_an7581，
+          # AN7583 下选不中；由下面的 "Patch pon-drivers for AN7583" 步骤修正。
+          #
+          # sed 先把注释剥掉再 grep，避免命中说明性注释。
+          if ! sed 's/#.*//' target/linux/airoha/image/an7583.mk | grep -q 'paged-bosa'; then
+            echo "::error::an7583.mk 缺少 kmod-airoha-paged-bosa，UX3363 光模块将无驱动可用"
             exit 1
           fi
 
@@ -123,6 +125,31 @@ jobs:
           ls -l scripts/feeds config/check-uname.sh 2>/dev/null || true
       - name: Update feeds
         run: ./scripts/feeds update -a
+
+      - name: Patch pon-drivers for AN7583
+        run: |
+          # 上游 openwrt-pon-drivers 的 airoha-pon-frontends/Makefile 里，
+          # airoha-pon-frontend 和 airoha-en7572 的 DEPENDS 都是
+          #   @(TARGET_airoha_an7581||TARGET_airoha_an7583)
+          # 唯独 airoha-paged-bosa 只写了 @TARGET_airoha_an7581。
+          # 后果：AN7583 设备在 Kconfig 里看不到这个包 → 选不中 → 不进镜像
+          # → DTS 里的 BOSA 节点无人绑定 → airoha_pon_frontend_get()
+          # 拿不到 provider → airoha-xpon probe 失败 → pon0 不出现。
+          #
+          # 光模块是 UX3363，该驱动就在 airoha-paged-bosa.ko 里。
+          f=feeds/pon_drivers/airoha-pon-frontends/Makefile
+          test -f "$f" || { echo "::error::$f 不存在，feed 结构变了"; exit 1; }
+          echo "--- 打补丁前 ---"
+          grep -n 'DEPENDS' "$f"
+          patch -p1 -d feeds/pon_drivers < board/airoha-paged-bosa-an7583.patch
+          echo "--- 打补丁后 ---"
+          grep -n 'DEPENDS' "$f"
+          n=$(grep -c 'TARGET_airoha_an7583' "$f")
+          if [ "$n" != "3" ]; then
+            echo "::error::期望 3 个包都支持 AN7583，实际 $n 个"
+            exit 1
+          fi
+          echo "OK: 三个 PON 前端包都支持 AN7583"
 
       - name: Provide libffi
         run: |

@@ -17,8 +17,18 @@ define Device/fiberhome_hg5380a
 	BLOCKSIZE := 128k
 	PAGESIZE := 2048
 	KERNEL_SIZE := 6144k
+	# 光模块是 UX3363（bosacal 分区 table 写着 ux3363），
+	# 只有 kmod-airoha-paged-bosa 里的 airoha-paged-bosa-ux3363.c 能驱动它。
+	#
+	# 上游 feed 给这个包的 DEPENDS 只写了 @TARGET_airoha_an7581，
+	# AN7583 下选不中；由 board/airoha-paged-bosa-an7583.patch 修正
+	# （在 workflow 的 feeds update 之后应用）。
+	# 缺了它 DTS 的 BOSA 节点无人绑定，airoha-xpon probe 失败，pon0 不出现。
+	#
+	# en7572 保留：换装 EN7572 前端时两个驱动并存不冲突，各按 compatible 匹配。
 	DEVICE_PACKAGES := kmod-phy-airoha-en8811h \
-		kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond
+		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
+		airoha-ponctl airoha-pond
 	IMAGES := sysupgrade.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
 		pad-rootfs | append-metadata
