@@ -86,9 +86,12 @@ jobs:
           echo "--- 应用后的 device 定义 ---"
           sed -n '/define Device\/fiberhome_hg5380a/,/^TARGET_DEVICES += fiberhome_hg5380a/p' \
             target/linux/airoha/image/an7583.mk
-          echo "--- 不应再出现 paged-bosa ---"
-          if grep -q 'paged-bosa' target/linux/airoha/image/an7583.mk; then
-            echo "::error::an7583.mk 里仍有 paged-bosa，该包只对 AN7581 可见"
+          echo "--- 不应再出现 paged-bosa（注释里的提醒除外）---"
+          # sed 先把注释剥掉再 grep：an7583.mk 的 hg5580a 块里有一行注释专门
+          # 写着「绝对不要加 kmod-airoha-paged-bosa」，直接 grep 整个文件会
+          # 命中那句注释，把正确的文件判成错的。
+          if sed 's/#.*//' target/linux/airoha/image/an7583.mk | grep -q 'paged-bosa'; then
+            echo "::error::an7583.mk 里仍有 paged-bosa 依赖，该包只对 AN7581 可见"
             exit 1
           fi
 

@@ -142,9 +142,14 @@ jobs:
 
           # kmod-airoha-paged-bosa 只对 TARGET_airoha_an7581 可见，
           # AN7583 下没有这个符号，出现即说明抄错了块。
+          #
+          # 必须先 sed 's/#.*//' 把注释剥掉再 grep：这个块里本来就有一行注释
+          # 在提醒「不要加 paged-bosa」，直接 grep 会命中那句注释，
+          # 把一个正确的块判成错的。CI 上表现为 1 分钟就 exit 1。
           if sed -n '/define Device\/fiberhome_hg5580a/,/^TARGET_DEVICES += fiberhome_hg5580a/p' \
-               target/linux/airoha/image/an7583.mk | grep -q 'paged-bosa'; then
-            echo "::error::hg5580a 块里出现 paged-bosa，该包只对 AN7581 可见"
+               target/linux/airoha/image/an7583.mk \
+             | sed 's/#.*//' | grep -q 'paged-bosa'; then
+            echo "::error::hg5580a 块里出现 paged-bosa 依赖，该包只对 AN7581 可见"
             exit 1
           fi
 
