@@ -422,8 +422,15 @@
 	 *   0x28 -> gn28l95   0x98 -> gn28l98
 	 *   0x2e -> ux3361    0x96 -> gn25l96
 	 *   0x20 -> ux3320    0x02 -> ux3322
-	 * 用户明确说本机光模块是 3361（UX3361），即 chip id 0x2e。
 	 * 地址 0x51、分页 0x7f、chip id 读 0xA4。
+	 *
+	 * 【型号存疑，待上机确认】两处证据互相矛盾：
+	 *   - 口头说法：本机光模块是 3361（UX3361），对应 chip id 0x2e
+	 *   - 设备自己的记录：factory/fhdata 里的 table 文件写的是 ux3363
+	 * 后者是厂商在出厂时写进 flash 的型号字符串，通常比口头描述可靠。
+	 * 但 U-Boot 没有 i2c 命令（94 条命令里没有），当前无法读 0xA4 验证，
+	 * 只能等 PonWRT 起来后实测。驱动按 paged-bosa 通用方式工作，
+	 * 型号差异主要影响校准系数的解释，不影响能否驱动。
 	 */
 	hg5580a_bosa: optical-front-end@51 {
 		compatible = "fiberhome,hg5x-bosa", "airoha,paged-bosa";
