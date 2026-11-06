@@ -49,6 +49,13 @@ on:
       - 'configs/hg5580a-packages.config'
       - 'target/linux/airoha/**'
       - '.github/workflows/build-hg5580a.yml'
+      # package/ 下的改动直接改变固件内容，必须触发重建：
+      #   base-files  —— /bin/board_detect、/bin/config_generate 决定板级配置能否生成
+      #   libs/*      —— libubox 等基础库的编译选项/补丁会影响整条用户态链路
+      # 之前这里漏了 package/**，导致修好 base-files 后 CI 完全不重跑。
+      - 'package/**'
+      - 'include/**'
+      - 'scripts/**'
   workflow_dispatch:
     inputs:
       profile:
