@@ -286,15 +286,18 @@ jobs:
           #
           #   kmod-phy-motorcomm        - 本机 2.5G PHY 是 YT8821（MDIO 0x07）
           #   kmod-phy-airoha-en8811h   - GSW 内部 PHY（gsw_phy2..4 -> lan2..lan4）
-          #   kmod-airoha-en7572        - AN7583 的 PON 前端
+          #   kmod-airoha-paged-bosa    - UX3363 光模块驱动（paged I2C 前端）
+          #   kmod-airoha-en7572        - EN7572 前端（换装时用，并存不冲突）
           #   kmod-airoha-xpon          - XPON 协议栈
           #   airoha-ponctl / airoha-pond - PON 控制与守护进程
           #
-          # 绝对不要加 kmod-airoha-paged-bosa：该包 DEPENDS:=@TARGET_airoha_an7581，
-          # AN7583 下没有这个符号，打包会报 "(no such package)"。
+          # kmod-airoha-paged-bosa 上游只写了 @TARGET_airoha_an7581，
+          # 由 "Patch pon-drivers for AN7583" 步骤修正后才可选；
+          # 这里的 Configure 排在补丁之后，所以能正常选中。
           cat >> .config <<'EOF'
           CONFIG_PACKAGE_kmod-phy-motorcomm=y
           CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
           CONFIG_PACKAGE_kmod-airoha-en7572=y
           CONFIG_PACKAGE_kmod-airoha-xpon=y
           CONFIG_PACKAGE_airoha-ponctl=y
@@ -306,6 +309,10 @@ jobs:
           sed -i 's/^ *//' .config
 
           make defconfig
+          # defconfig 之后必须仍然是 =y：若补丁没生效，这个符号不可见，
+          # 会被静默丢弃，最终在打包阶段报 "(no such package)"。
+          grep -q '^CONFIG_PACKAGE_kmod-airoha-paged-bosa=y' .config || {
+            echo "::error::kmod-airoha-paged-bosa 未被选中，检查 AN7583 补丁是否生效"; exit 1; }
           echo "--- device selection ---"
           grep -E '^CONFIG_TARGET_DEVICE_airoha' .config | grep '=y' || {
             echo "设备未被选中，请检查 an7583.mk 里的设备名"; exit 1; }
