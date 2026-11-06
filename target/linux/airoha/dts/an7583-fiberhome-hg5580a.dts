@@ -280,9 +280,19 @@
 		};
 
 		/*
-		 * 原厂 apps 占 104 MiB，OpenWrt 完全不用。切出前 32 MiB 保留
-		 * 原厂数据（万一要回滚），其余 72 MiB 给 overlay：
-		 * fstools 会按名字 "rootfs_data" 找到它并格式化成 ext4。
+		 * 下面两段的偏移和长度与厂商标定表逐字节一致（已在设备上实测）。
+		 *
+		 *   apps        0x5F00000 +0x2000000   原厂应用区，32 MiB
+		 *   rootfs_data 0x7F00000 +0x4800000   原厂 UBI 数据区，72 MiB
+		 *
+		 * 第二段不是 apps 的剩余空间，更不是空白区。实测它的开头就是
+		 * UBI EC 头（"UBI#"），72 MiB 全部非空，是厂商自己的 UBI 数据
+		 * 卷。已完整备份到 backup/rootfs_data.bin 并按每块设备的 CRC32
+		 * 逐个偏移验证过。
+		 *
+		 * fstools 是按分区名 "rootfs_data" 找 overlay 的，所以这里必须
+		 * 沿用这个名字；代价是首次启动格式化会覆盖上述厂商数据。
+		 * 要保留就得先从备份写回，再决定这一段的归属。
 		 */
 		partition@5f00000 {
 			label = "apps";
@@ -305,8 +315,20 @@
 		};
 
 		/*
-		 * 原厂 factory 是 UBI 单卷 "fhdata"（UBIFS），里面是 UCI 配置
-		 * （factory_conf.brmac 等）与光模块校准表。
+		 * 原厂 factory 是 UBI 容器：40 个 PEB，容量表里只有一个用户卷
+		 * "fhdata"（32 PEB = 4 MiB），里面是 UBIFS，共 11 个文件。
+		 *
+		 * 已在本机解出并确认的关键内容：
+		 *   table          2048 字节  BOSA 校准表（FiberHome BDBOB 容器）
+		 *   factory_conf   ManufacturerOUI / SerialNumber / UserPasswd / SSID
+		 *   sysinfo_conf   area_code / operators_code / 版本号
+		 *   led_gpio_conf  灯位映射
+		 *
+		 * 注意这个 UBI 用的是旧版卷表布局：vol_type=u8、upd_marker=u8、
+		 * name_len=be16，name 从记录 +16 开始，记录长 172 字节；卷表记录
+		 * 的校验和是 ~crc32(rec[:168])（不做最终取反）。按新版布局解析
+		 * 会得到乱码。
+		 *
 		 * 保持 read-only：这是整机唯一一份身份数据。
 		 */
 		partition@e700000 {
@@ -322,7 +344,16 @@
 			};
 		};
 
-		/* BOSA 校准表（FiberHome BDBOB 容器，2048 字节） */
+		/*
+		 * BOSA 校准表（FiberHome BDBOB 容器，2048 字节）。
+		 *
+		 * 本机实测该分区原本整块是 0xFF —— 厂商从没往这里拷过东西，
+		 * 而内核从这个 nvmem cell 读校准，不填就会读到 0xFF。
+		 * 内容已从 factory/fhdata 的 table 文件取出并写入本分区，
+		 * 写入后回读 crc32 = f1315e00，与 table 完全一致。
+		 *
+		 * table 里记录的模块型号是 ux3363。
+		 */
 		partition@ec00000 {
 			label = "bosacal";
 			reg = <0xec00000 0x20000>;
@@ -336,12 +367,19 @@
 		};
 
 		/*
-		 * 出厂身份数据。偏移与长度沿用 HG5380A 的布局，
-		 * 但里面的实际值必须在本机从 factory/fhdata 读出来再写入，
-		 * 否则 MAC 是随机的、PON 注册序列号也是错的。
+		 * 出厂身份数据。本机实测该分区同样是整块 0xFF（空的）。
+		 *
+		 * 偏移与长度沿用 HG5380A 的布局：
 		 *   +0x00 base MAC     +0x06 LAN/2.5G MAC
 		 *   +0x0C PON SN(8 字节，"FHTT"+4 字节)
 		 *   +0x14 PON MAC
+		 *
+		 * 但本机对应的取值来源是 factory/fhdata 里的 factory_conf：
+		 *   ManufacturerOUI = 24E3A4   （与实测 MAC 24-E3-A4-xx 一致）
+		 *   SerialNumber    = 3B83524E3A4B2DDDC
+		 * 这串序列号的格式与 HG5380A 的 "FHTT"+4 字节并不相同，
+		 * 映射关系还没确定，所以不能直接照抄 5380A 的写入逻辑。
+		 * 在此之前，identity 保持为空，MAC 由 base-files 另行处理。
 		 */
 		partition@ec20000 {
 			label = "identity";
