@@ -69,11 +69,21 @@
 
 	chosen {
 		/*
-		 * RootfsB(mtd5) 上的 squashfs。initramfs 镜像会忽略这两个参数
+		 * RootfsB 上的 squashfs。initramfs 镜像会忽略这两个参数
 		 * （内核优先跑 initramfs 里的 /init），所以同一条 DTS 可以同时
 		 * 服务两种镜像。
+		 *
+		 * mtdblock 编号必须按本 DTS 的 partitions 子节点顺序数，不能照抄
+		 * 别的板子。实际顺序是：
+		 *   mtd0 bootloader  mtd1 bootflag   mtd2 KernelA   mtd3 RootfsA
+		 *   mtd4 KernelB     mtd5 RootfsB    mtd6 apps      mtd7 rootfs_data
+		 *   mtd8 frameworka  mtd9 frameworkb mtd10 factory
+		 *   mtd11 bosacal    mtd12 identity
+		 * 原先这里写的是 mtdblock6，那是 apps；改成 mtdblock5 指向 RootfsB。
+		 * 正常启动时 bargsenv 会按 rootfs_partition_name 覆盖本行，
+		 * 但覆盖失效时这个值就会真的被用上，所以必须是正确的。
 		 */
-		bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce root=/dev/mtdblock6 rootfstype=squashfs rootwait";
+		bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce root=/dev/mtdblock5 rootfstype=squashfs rootwait";
 		stdout-path = "serial0:115200n8";
 	};
 
