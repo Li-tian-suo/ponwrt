@@ -1,0 +1,96 @@
+From: PonWrt <ponwrt@example.invalid>
+Date: Fri, 7 Nov 2026 01:30:00 +0800
+Subject: [PATCH] net: airoha: share one fallback MAC base across GDMs
+
+airoha_alloc_gdm_device() calls eth_hw_addr_random() for every GDM
+independently whenever of_get_ethdev_address() fails, so each port ends up
+with an unrelated random OUI:
+
+    gdm1 -> 36:f7:1d:aa:bb:cc
+    gdm3 -> 9e:41:02:dd:ee:ff
+
+airoha_set_macaddr() then rejects the second device, because the hardware
+requires every GDM that shares a LAN/WAN side to use the same three most
+significant bytes:
+
+    gdm3: wrong mac addr, MSBs must be 36:f7:1d
+    FE hw forwarding won't work properly
+
+and returns -EINVAL, which disables front-end hardware forwarding.
+
+This is reachable on boards whose MAC storage the kernel cannot read, e.g.
+FiberHome HG5580A: its "identity" MTD partition is still erased (all 0xff)
+on units that never finished a vendor first boot.  All-0xff fails
+is_valid_ether_addr() because 0xff is a multicast address, so both the DT
+property lookup and the nvmem cell lookup fail and the random fallback runs.
+
+Randomise one base per controller into struct airoha_eth and hand out
+consecutive addresses from it, varying only the low byte per port.  All GDMs
+now share the OUI, ports stay distinguishable, and the locally-administered
+bit remains set as eth_hw_addr_random() intends.  addr_assign_type is set to
+NET_ADDR_RANDOM so the address is still reported as randomised.
+
+Signed-off-by: PonWrt <ponwrt@example.invalid>
+---
+
+--- a/drivers/net/ethernet/airoha/airoha_eth.h
++++ b/drivers/net/ethernet/airoha/airoha_eth.h
+@@ -767,6 +767,15 @@
+ 
+ 	struct net_device *napi_dev;
+ 
++	/* Fallback MAC base for GDMs that have no usable address in DT or
++	 * in nvmem.  airoha_set_macaddr() requires every GDM on the same
++	 * LAN/WAN side to share the three most significant bytes, so the
++	 * base is randomised once per controller and each port only varies
++	 * the low byte.
++	 */
++	u8 fallback_mac_base[ETH_ALEN];
++	bool fallback_mac_base_valid;
++
+ 	struct airoha_qdma qdma[AIROHA_MAX_NUM_QDMA];
+ 	struct airoha_gdm_port *ports[AIROHA_MAX_NUM_GDM_PORTS];
+ };
+--- a/drivers/net/ethernet/airoha/airoha_eth.c
++++ b/drivers/net/ethernet/airoha/airoha_eth.c
+@@ -4567,6 +4567,7 @@
+ 	struct airoha_gdm_dev *dev;
+ 	int err, i;
+ 	u8 index;
++	u8 fallback_addr[ETH_ALEN];
+ 
+ 	netdev = devm_alloc_etherdev_mqs(eth->dev, sizeof(*dev),
+ 					 AIROHA_NUM_NETDEV_TX_RINGS,
+@@ -4595,9 +4596,27 @@
+ 		if (err == -EPROBE_DEFER)
+ 			return err;
+ 
+-		eth_hw_addr_random(netdev);
+-		dev_info(eth->dev, "generated random MAC address %pM\n",
+-			 netdev->dev_addr);
++		/* airoha_set_macaddr() refuses GDMs that disagree on the three
++		 * most significant MAC bytes, which is exactly what independent
++		 * per-port randomisation produces.  Randomise one base per
++		 * controller instead and give each port a distinct low byte.
++		 */
++		if (!eth->fallback_mac_base_valid) {
++			eth_random_addr(eth->fallback_mac_base);
++			eth->fallback_mac_base_valid = true;
++		}
++
++		ether_addr_copy(fallback_addr, eth->fallback_mac_base);
++		fallback_addr[ETH_ALEN - 1] =
++			eth->fallback_mac_base[ETH_ALEN - 1] +
++			(port->id << 2) + nbq;
++
++		eth_hw_addr_set(netdev, fallback_addr);
++		netdev->addr_assign_type = NET_ADDR_RANDOM;
++
++		dev_info(eth->dev,
++			 "GDM%u has no usable MAC, using %pM (base %pM)\n",
++			 port->id, fallback_addr, eth->fallback_mac_base);
+ 	}
+ 
+ 	/* Allowed nbq for EN7581 on GDM3 port are 4 and 5 for PCIE0
+-- 
+2.43.0
