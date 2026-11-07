@@ -284,9 +284,26 @@
 			reg = <0x3100000 0x600000>;
 		};
 
+		/*
+		 * linux,rootfs 让内核把本分区设为默认根设备。
+		 *
+		 * 没有它时，drivers/mtd/mtdcore.c 只在分区名恰好是 "rootfs"
+		 * 且开了 CONFIG_MTD_ROOTFS_ROOT_DEV 时才设 ROOT_DEV：
+		 *
+		 *   if (of_property_read_bool(of_node, "linux,rootfs") ||
+		 *       (MTD_ROOTFS_ROOT_DEV && !strcmp(mtd->name, "rootfs") && ROOT_DEV == 0))
+		 *
+		 * 本机分区名是 "RootfsB"，不匹配那条字符串比较；
+		 * 于是内核拿不到根设备，退回按 rootfstype 探测，
+		 * 在 squashfs 分区上试 jffs2，报
+		 *   "Cowardly refusing to erase blocks on filesystem with no valid JFFS2 nodes"。
+		 *
+		 * 加这个属性后，bootargs 里的 root= 可以省略。
+		 */
 		partition@3700000 {
 			label = "RootfsB";
 			reg = <0x3700000 0x2800000>;
+			linux,rootfs;
 		};
 
 		/*
