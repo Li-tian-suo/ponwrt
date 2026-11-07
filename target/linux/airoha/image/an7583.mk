@@ -13,6 +13,39 @@ define Build/an7583-bl31-uboot
   cat $(STAGING_DIR_IMAGE)/an7583_$1-bl31-u-boot.fip >> $@
 endef
 
+# ---------------------------------------------------------------------------
+# FiberHome HG5580A: wrap the OpenWrt FIT in the vendor KernelX container.
+#
+# The vendor U-Boot 2023.04 `ldkernel` does not boot a bare FIT.  It expects a
+# 8448-byte private header followed by a FIT whose header declares
+# totalsize = 0x1000 (NOT the FIT's own length); U-Boot uses that declared
+# value to locate the payload:
+#
+#     0x0000..0x2100   private header (X.509 + "HDR2")
+#     0x2100           FIT metadata, totalsize = 0x1000
+#     0x3100 + off     payload
+#     total_size = *(le32)(+0xA0) + *(le32)(+0x98)
+#
+# The private header carries vendor signing material and cannot be rebuilt
+# without FiberHome's private key, so board/hg5580a-vendor-header.bin holds the
+# first 0x2100 bytes of a real KernelA dump.
+#
+# KernelX is 6 MiB, so this only works with the SYSUPGRADE FIT: the initramfs
+# kernel embeds the whole rootfs and is ~10.7 MiB.
+# ---------------------------------------------------------------------------
+HG5580A_MKVENDOR := $(TOPDIR)/scripts/mkvendor-kernel.py
+HG5580A_VENDOR_HDR := $(TOPDIR)/board/hg5580a-vendor-header.bin
+HG5580A_PYTHON := $(STAGING_DIR_HOST)/bin/python3
+
+define Build/mtd-kernel-bin
+	$(HG5580A_PYTHON) $(HG5580A_MKVENDOR) --header $(HG5580A_VENDOR_HDR) --fit $(KDIR_KERNEL_IMAGE) --part-size 0x600000 --out $@ --quiet
+endef
+
+# RootfsX is a bare partition holding a plain squashfs.
+define Build/mtd-rootfs-bin
+	cp $(KDIR)/root.squashfs $@
+endef
+
 define Device/FitImageLzma
   KERNEL_SUFFIX := -uImage.itb
   KERNEL = kernel-bin | lzma | \
@@ -143,8 +176,42 @@ define Device/fiberhome_hg5580a
 	DEVICE_PACKAGES := kmod-phy-motorcomm \
 		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
 		airoha-ponctl airoha-pond
-	IMAGES := sysupgrade.bin
+	IMAGES := sysupgrade.bin mtd-kernel.bin mtd-rootfs.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
 		pad-rootfs | append-metadata
+
+	# ------------------------------------------------------------------
+	# 原厂 U-Boot 2023.04 的 ldkernel 不直接启动裸 FIT。它要求一层
+	# 8448 字节私有头，并且 FIT 头的 totalsize 字段必须声明为 0x1000
+	# （不是 FIT 自身长度），U-Boot 用这个值算 payload 基准地址：
+	#
+	#   0x0000..0x2100  私有头（含 X.509 与 "HDR2"）
+	#   0x2100          FIT 元数据，totalsize = 0x1000
+	#   0x3100 + off    payload
+	#   total_size = *(le32)(+0xA0) + *(le32)(+0x98)
+	#
+	# 私有头必须从本机原厂备份复制：它带厂商签名材料，
+	# 没有私钥无法重建。放置位置见 board/hg5580a-vendor-header.bin。
+	#
+	# 生成 mtd-kernel.bin 之前需要先备份 KernelA：
+	#   dd if=/dev/mtd2 of=board/hg5580a-vendor-header-raw.bin
+	# 脚本会自动截取前 0x2100 字节当作私有头。
+	# ------------------------------------------------------------------
+	MKVENDOR := $(TOPDIR)/scripts/mkvendor-kernel.py
+	VENDOR_HDR := $(TOPDIR)/board/hg5580a-vendor-header.bin
+	VENDOR_PY := $(STAGING_DIR_HOST)/bin/python3
+
+	# IMAGE/<name> := 后面跟的是用 | 分隔的 Build/ 命令列表，每个命令名都会
+	# 被解析成 Build/<name>。Build/ 函数体必须是单行 —— 带续行和参数的
+	# 多行写法会被 split_args 按词拆开，报 "Missing Build/--header"。
+	#
+	# 注意：$(KDIR_KERNEL_IMAGE) 才是 KERNEL 规则产出的 FIT；
+	# $(KDIR)/$(KERNEL_NAME) 是裸 Image。
+	# 用 $(STAGING_DIR_HOST)/bin/python3 而不是裸 python3，
+	# 否则会被当成缺少的命令名。
+	# Build/ 函数定义在文件顶部，不能在 Device/ 块内嵌套 define。
+	IMAGE/mtd-kernel.bin := mtd-kernel-bin
+	IMAGE/mtd-rootfs.bin := mtd-rootfs-bin
+
 endef
 TARGET_DEVICES += fiberhome_hg5580a
