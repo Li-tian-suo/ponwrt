@@ -41,9 +41,11 @@ define Build/mtd-kernel-bin
 	$(HG5580A_PYTHON) $(HG5580A_MKVENDOR) --header $(HG5580A_VENDOR_HDR) --fit $(KDIR_KERNEL_IMAGE) --part-size 0x600000 --out $@ --quiet
 endef
 
-# RootfsX is a bare partition holding a plain squashfs.
+# RootfsX is a bare partition.  Copy the PER-DEVICE squashfs, not plain
+# root.squashfs: the bare one omits DEVICE_PACKAGES, which would leave the box
+# without kmod-airoha-paged-bosa (no optical frontend, no pon0).
 define Build/mtd-rootfs-bin
-	cp $(KDIR)/root.squashfs $@
+	cp $(KDIR)/root.squashfs$(if $(TARGET_PER_DEVICE_ROOTFS),+pkg=$(ROOTFS_ID/$(DEVICE_NAME))) $@
 endef
 
 define Device/FitImageLzma
