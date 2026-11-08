@@ -83,7 +83,7 @@
 		 * 正常启动时 bargsenv 会按 rootfs_partition_name 覆盖本行，
 		 * 但覆盖失效时这个值就会真的被用上，所以必须是正确的。
 		 */
-		bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce root=/dev/mtdblock5 rootfstype=squashfs rootwait";
+		bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce root=/dev/mtdblock5 rootfstype=squashfs rootwait fstools_overlay_name=overlay";
 		stdout-path = "serial0:115200n8";
 	};
 
@@ -322,9 +322,31 @@
 		 * 里放的 UBI 数据卷。已完整备份到 backup/rootfs_data.bin，并按
 		 * 每块设备的 CRC32 逐个偏移验证过（288 个偏移全部吻合）。
 		 *
-		 * fstools 是按分区名 "rootfs_data" 找 overlay 的，所以这里必须
-		 * 沿用这个名字；代价是首次启动格式化会覆盖上述厂商数据。
-		 * 要保留就得先从备份写回，再决定这一段的归属。
+		 * 但这段**不能**再叫 rootfs_data。实测本机的 mtd6
+		 * （squashfs-split 从 RootfsB 尾部自动切出来的那段）
+		 * 有一个 ECC 不可纠正的擦除块：
+		 *
+		 *   jffs2: cannot read OOB for EB at 020e0000,
+		 *          requested 8 bytes, read 8 bytes, error -74
+		 *   mount_root: failed to mount -t jffs2 /dev/mtdblock6
+		 *               /tmp/overlay: I/O error
+		 *
+		 * -74 是 EBADMSG。单独读第 263 块（offset 0x020e0000）
+		 * 会让 ecc_failures 递增，读邻居 262/264 则不变，
+		 * 而 bad_blocks 仍是 0 —— 属于「ECC 坏但未标记坏块」。
+		 * jffs2 不会跳过坏块，所以那段分区根本挂不上，
+		 * 结果 overlay 退回 tmpfs，主机名和密码全部丢失。
+		 *
+		 * 改成 overlay 这个名字，启动参数里配
+		 *   fstools_overlay_name=overlay
+		 * 让 fstools 用这一段（mtd8）做 overlay。
+		 * 挂载点见 fstools/libfstools/mount_root.c：
+		 *   dataname = "rootfs_data";
+		 *   if (get_var_from_file("/proc/cmdline", "fstools_overlay_name", ...))
+		 *
+		 * 代价是首次启动会格式化这一段，覆盖厂商那 72 MiB UBI 卷；
+		 * 内容已完整备份到 backup/rootfs_data.bin（75,497,472 B，
+		 * 每擦除块的 CRC32 都验证过），需要时可以写回。
 		 */
 		partition@5f00000 {
 			label = "apps";
@@ -332,7 +354,7 @@
 		};
 
 		partition@7f00000 {
-			label = "rootfs_data";
+			label = "overlay";
 			reg = <0x7f00000 0x4800000>;
 		};
 

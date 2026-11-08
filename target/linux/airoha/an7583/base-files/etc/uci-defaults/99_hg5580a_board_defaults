@@ -1,0 +1,48 @@
+#!/bin/sh
+#
+# Board defaults for FiberHome HG5580A (Airoha AN7583).
+#
+# Everything here fixes something that measurably breaks on this board and
+# cannot live in a DTS or a package default.
+#
+set -e
+
+#
+# 1. Software flow offload breaks the WHOLE firewall ruleset on AN7583.
+#
+#    With it enabled, fw4 renders a ruleset containing
+#
+#        meta l4proto { tcp, udp } flow offload @fb;
+#
+#    and nft rejects the entire table:
+#
+#        Error: Could not process rule: Protocol error
+#                meta l4proto { tcp, udp } flow offload @fb;
+#                                          ^^^^^^^^^^^^^^^^
+#        The rendered ruleset contains errors, not doing firewall restart.
+#
+#    fw4 then leaves a stub `chain input { policy drop; ... }` with no
+#    `iifname "br-lan" jump input_lan`, so every inbound packet to the router
+#    is dropped: no ping, no LuCI, no SSH from the LAN.
+#
+#    Hardware offload is off by default but pin both so a future default flip
+#    cannot silently lock us out again.
+#
+uci set firewall.@defaults[0].flow_offloading=0
+uci set firewall.@defaults[0].flow_offloading_hw=0
+
+#
+# 2. uhttpd's rfc1918_filter rejects LAN access to the LAN address.
+#
+#    The filter is a DNS-rebinding countermeasure: it refuses requests where a
+#    private source address targets a private destination.  On a router whose
+#    only address IS private, that means every LAN client gets 403 on
+#    /cgi-bin/luci/ while static files still return 200 -- an easy symptom to
+#    misread as "LuCI is broken".
+#
+uci set uhttpd.main.rfc1918_filter='0'
+
+uci commit firewall
+uci commit uhttpd
+
+exit 0
