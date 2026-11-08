@@ -1,0 +1,13 @@
+{
+	"admin/services/homebox": {
+		"title": "Homebox \u6d4b\u901f",
+		"order": 60,
+		"action": {
+			"type": "view",
+			"path": "homebox/index"
+		},
+		"depends": {
+			"acl": [ "luci-app-homebox" ]
+		}
+	}
+}

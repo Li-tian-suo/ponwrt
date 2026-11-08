@@ -1,0 +1,21 @@
+{
+	"luci-app-homebox": {
+		"description": "Homebox service control",
+		"read": {
+			"uci": [ "homebox" ],
+			"file": {
+				"/etc/config/homebox": [ "read" ],
+				"/usr/bin/homebox": [ "read" ],
+				"/etc/init.d/homebox": [ "exec" ]
+			}
+		},
+		"write": {
+			"uci": [ "homebox" ],
+			"file": {
+				"/etc/config/homebox": [ "write" ],
+				"/etc/init.d/homebox": [ "exec" ],
+				"/usr/bin/homebox": [ "exec" ]
+			}
+		}
+	}
+}
