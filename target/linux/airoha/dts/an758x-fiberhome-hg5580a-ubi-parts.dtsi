@@ -1,0 +1,223 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * FiberHome HG5580A -- UBI partition layout.
+ *
+ * Replaces the stock 14-partition table.  Real hardware reports 10 partitions
+ * and "apps" is 104 MiB; UBI lives entirely inside that window so nothing
+ * outside it is ever written by U-Boot.  That keeps "factory" (MAC / PON
+ * serial / optical calibration) safe across a bootloader reflash.
+ *
+ * This file must stay in sync with uboot-port/dts/an7583-fiberhome-hg5580a.dts
+ * - if the label or size of the UBI partition differs, U-Boot looks for a
+ * partition the kernel does not describe (or the reverse).
+ *
+ * The whole &spi_nand node is written out here rather than patched onto the
+ * common file's node, because the common file deliberately keeps only
+ * `status = "okay"` and therefore exposes no label to attach to.
+ */
+
+&snfi {
+	status = "okay";
+};
+
+&spi_nand {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Whole flash, so a full dump is possible from Linux too. */
+		partition@0_all {
+			label = "all_flash";
+			reg = <0x0 0x10000000>;
+			read-only;
+		};
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x280000>;
+			read-only;
+		};
+
+		partition@280000 {
+			label = "bootflag";
+			reg = <0x280000 0x80000>;
+			read-only;
+		};
+
+		partition@300000 {
+			label = "KernelA";
+			reg = <0x300000 0x600000>;
+			read-only;
+		};
+
+		partition@900000 {
+			label = "RootfsA";
+			reg = <0x900000 0x2800000>;
+			read-only;
+		};
+
+		partition@3100000 {
+			label = "KernelB";
+			reg = <0x3100000 0x600000>;
+		};
+
+		partition@3700000 {
+			label = "RootfsB";
+			reg = <0x3700000 0x2800000>;
+		};
+
+		/*
+		 * The only partition U-Boot formats and manages (104 MiB).
+		 * compatible = "linux,ubi" makes the kernel attach the UBI
+		 * device and register the named volumes below.
+		 */
+		partition@5f00000 {
+			label = "ubi";
+			reg = <0x5f00000 0x6800000>;
+			compatible = "linux,ubi";
+
+			volumes {
+				/*
+				 * UX3363 paged BOSA calibration.  The volume
+				 * keeps its UBI header, so the payload starts
+				 * at 0x2 -- same reasoning as the nokia UBI
+				 * variant.
+				 *
+				 * Exposed as the provider the BOSA node in the
+				 * common file consumes via
+				 * nvmem-cells = <&bosa_calibration>.
+				 */
+				ubi-volume-bosa {
+					volname = "bosa";
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						bosa_calibration: calibration@2 {
+							reg = <0x2 0x800>;
+						};
+					};
+				};
+
+				/*
+				 * Board identity.  The recovery image writes
+				 * the same offsets this file describes:
+				 *   0x00  6 bytes  base MAC
+				 *   0x06  6 bytes  LAN / 2.5G MAC
+				 *   0x0c  8 bytes  PON serial
+				 *   0x14  6 bytes  PON MAC
+				 *
+				 * These four labels are what the common file's
+				 * gdm1 / gdm2 / gdm3 nodes consume.
+				 */
+				ubi-volume-ri {
+					volname = "ri";
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						fh_base_mac: mac-address@0 {
+							reg = <0x0 0x6>;
+						};
+
+						fh_lan_mac: mac-address@6 {
+							reg = <0x6 0x6>;
+						};
+
+						fh_pon_serial: pon-serial@c {
+							reg = <0xc 0x8>;
+						};
+
+						fh_pon_mac: mac-address@14 {
+							reg = <0x14 0x6>;
+						};
+					};
+				};
+
+				ubi_fit: ubi-volume-fit {
+					volname = "fit";
+				};
+
+				ubi-volume-fip {
+					volname = "fip";
+				};
+
+				ubi_env: ubi-volume-ubootenv {
+					volname = "ubootenv";
+				};
+
+				ubi_env2: ubi-volume-ubootenv2 {
+					volname = "ubootenv2";
+				};
+			};
+		};
+
+		partition@c700000 {
+			label = "frameworka";
+			reg = <0xc700000 0x1000000>;
+			read-only;
+		};
+
+		partition@d700000 {
+			label = "frameworkb";
+			reg = <0xd700000 0x1000000>;
+			read-only;
+		};
+
+		/*
+		 * MAC / PON serial / optical calibration as shipped by the
+		 * vendor.  Never written.  The vendor stores it as a UBI volume
+		 * called "fhdata" holding a UBIFS with table / factory_conf /
+		 * sysinfo_conf / led_gpio_conf.
+		 */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+			compatible = "linux,ubi";
+
+			volumes {
+				ubi_fhdata: ubi-volume-fhdata {
+					volname = "fhdata";
+				};
+			};
+		};
+	};
+};
+
+&ubi_env {
+	nvmem-layout {
+		compatible = "u-boot,env-redundant-bool-layout";
+	};
+};
+
+&ubi_env2 {
+	nvmem-layout {
+		compatible = "u-boot,env-redundant-bool-layout";
+	};
+};
+
+/*
+ * Root specification for the UBI layout.
+ *
+ * There is no mtd rootfs and no overlay partition.  U-Boot boots the FIT from
+ * the UBI "fit" volume and fitblk releases the rootfs inside it as a block
+ * device, so rootdisk names the volume and ubi.block=0,fit tells the kernel
+ * which UBI volume to publish as a block device.
+ *
+ * root= is deliberately absent: adding it would send the kernel looking for a
+ * partition that does not exist on this layout.
+ */
+&fh_chosen {
+	rootdisk = <&ubi_fit>;
+	bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce rootwait ubi.block=0,fit ubi.fm_autoconvert=1";
+};

@@ -1,0 +1,268 @@
+/*
+ * Stock FiberHome partition table (14 partitions).
+ *
+ * Used by Device/fiberhome_hg5580a, which produces a bare squashfs for
+ * RootfsB and an overlay partition formatted as JFFS2 by fstools.
+ *
+ * NOTE: this does NOT match what real hardware reports today.  The unit
+ * ships with 10 partitions and "apps" is 104 MiB.  Kept for the stock-
+ * bootloader variant only; the UBI variant is the supported path.
+ */
+
+&spi_nand {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x280000>;
+			read-only;
+		};
+
+		partition@280000 {
+			label = "bootflag";
+			reg = <0x280000 0x80000>;
+		};
+
+		partition@300000 {
+			label = "KernelA";
+			reg = <0x300000 0x600000>;
+		};
+
+		partition@900000 {
+			label = "RootfsA";
+			reg = <0x900000 0x2800000>;
+		};
+
+		partition@3100000 {
+			label = "KernelB";
+			reg = <0x3100000 0x600000>;
+		};
+
+		/*
+		 * linux,rootfs 让内核把本分区设为默认根设备。
+		 *
+		 * 没有它时，drivers/mtd/mtdcore.c 只在分区名恰好是 "rootfs"
+		 * 且开了 CONFIG_MTD_ROOTFS_ROOT_DEV 时才设 ROOT_DEV：
+		 *
+		 *   if (of_property_read_bool(of_node, "linux,rootfs") ||
+		 *       (MTD_ROOTFS_ROOT_DEV && !strcmp(mtd->name, "rootfs") && ROOT_DEV == 0))
+		 *
+		 * 本机分区名是 "RootfsB"，不匹配那条字符串比较；
+		 * 于是内核拿不到根设备，退回按 rootfstype 探测，
+		 * 在 squashfs 分区上试 jffs2，报
+		 *   "Cowardly refusing to erase blocks on filesystem with no valid JFFS2 nodes"。
+		 *
+		 * 加这个属性后，bootargs 里的 root= 可以省略。
+		 */
+		partition@3700000 {
+			label = "RootfsB";
+			reg = <0x3700000 0x2800000>;
+			linux,rootfs;
+		};
+
+		/*
+		 * 厂商在这里只声明了一个 apps 分区：
+		 *
+		 *   设备 mtd list: apps 0x5F00000 .. 0xC700000   104 MiB
+		 *
+		 * 我们把它切成两段，两段合起来正好等于厂商那一个分区
+		 * （起点 0x5F00000、终点 0xC700000 都吻合，合计 0x6800000）：
+		 *
+		 *   apps        0x5F00000 +0x2000000   32 MiB，留给厂商应用区
+		 *   rootfs_data 0x7F00000 +0x4800000   72 MiB，OpenWrt 的 overlay
+		 *
+		 * 切法本身是安全的，但要知道第二段里原本不是空的：实测它的开头
+		 * 就是 UBI EC 头（"UBI#"），72 MiB 全部非空，是厂商在那 104 MiB
+		 * 里放的 UBI 数据卷。已完整备份到 backup/rootfs_data.bin，并按
+		 * 每块设备的 CRC32 逐个偏移验证过（288 个偏移全部吻合）。
+		 *
+		 * 但这段**不能**再叫 rootfs_data。实测本机的 mtd6
+		 * （squashfs-split 从 RootfsB 尾部自动切出来的那段）
+		 * 有一个 ECC 不可纠正的擦除块：
+		 *
+		 *   jffs2: cannot read OOB for EB at 020e0000,
+		 *          requested 8 bytes, read 8 bytes, error -74
+		 *   mount_root: failed to mount -t jffs2 /dev/mtdblock6
+		 *               /tmp/overlay: I/O error
+		 *
+		 * -74 是 EBADMSG。单独读第 263 块（offset 0x020e0000）
+		 * 会让 ecc_failures 递增，读邻居 262/264 则不变，
+		 * 而 bad_blocks 仍是 0 —— 属于「ECC 坏但未标记坏块」。
+		 * jffs2 不会跳过坏块，所以那段分区根本挂不上，
+		 * 结果 overlay 退回 tmpfs，主机名和密码全部丢失。
+		 *
+		 * 改成 overlay 这个名字，启动参数里配
+		 *   fstools_overlay_name=overlay
+		 * 让 fstools 用这一段（mtd8）做 overlay。
+		 * 挂载点见 fstools/libfstools/mount_root.c：
+		 *   dataname = "rootfs_data";
+		 *   if (get_var_from_file("/proc/cmdline", "fstools_overlay_name", ...))
+		 *
+		 * 代价是首次启动会格式化这一段，覆盖厂商那 72 MiB UBI 卷；
+		 * 内容已完整备份到 backup/rootfs_data.bin（75,497,472 B，
+		 * 每擦除块的 CRC32 都验证过），需要时可以写回。
+		 */
+		partition@5f00000 {
+			label = "apps";
+			reg = <0x5f00000 0x2000000>;
+		};
+
+		/*
+		 * overlay 只取 24 MiB，不是厂商那段的完整 72 MiB。
+		 *
+		 * 原因：这块 NAND 在这一段的后半部分有多个 ECC 不可纠正的
+		 * 坏块。实测两次格式化分别撞到分区内偏移 0x04700000 和
+		 * 0x047c0000（物理 0xC600000 / 0xC6C0000），报
+		 *   jffs2: cannot read OOB for EB at 047c0000, error -74
+		 *   mount_root: failed to mount -t jffs2 /dev/mtdblock8
+		 * 结果 overlay 挂不上，系统退回 tmpfs，主机名变 (none)，
+		 * 所有配置不持久。
+		 *
+		 * JFFS2 在格式化时要写擦除计数器，只要扫到坏块就整块失败。
+		 * 把分区限制在坏块之前（0x7f00000 + 0x1800000 = 0x9700000，
+		 * 远早于 0xC600000）就能稳定工作。
+		 *
+		 * 24 MiB 对这台机器足够：实测运行时 overlay 只用了 2.4 MB。
+		 * 剩下的 0x9700000..0xc700000 留给 apps 之外的用处。
+		 */
+		partition@7f00000 {
+			label = "overlay";
+			reg = <0x7f00000 0x1800000>;
+		};
+
+		partition@9700000 {
+			label = "apps_data";
+			reg = <0x9700000 0x3000000>;
+		};
+
+		partition@c700000 {
+			label = "frameworka";
+			reg = <0xc700000 0x1000000>;
+		};
+
+		partition@d700000 {
+			label = "frameworkb";
+			reg = <0xd700000 0x1000000>;
+		};
+
+		/*
+		 * 原厂 factory 是 UBI 容器：40 个 PEB，容量表里只有一个用户卷
+		 * "fhdata"（32 PEB = 4 MiB），里面是 UBIFS，共 11 个文件。
+		 *
+		 * 已在本机解出并确认的关键内容：
+		 *   table          2048 字节  BOSA 校准表（FiberHome BDBOB 容器）
+		 *   factory_conf   ManufacturerOUI / SerialNumber / UserPasswd / SSID
+		 *   sysinfo_conf   area_code / operators_code / 版本号
+		 *   led_gpio_conf  灯位映射
+		 *
+		 * 注意这个 UBI 用的是旧版卷表布局：vol_type=u8、upd_marker=u8、
+		 * name_len=be16，name 从记录 +16 开始，记录长 172 字节；卷表记录
+		 * 的校验和是 ~crc32(rec[:168])（不做最终取反）。按新版布局解析
+		 * 会得到乱码。
+		 *
+		 * 保持 read-only：这是整机唯一一份身份数据。
+		 */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+			compatible = "linux,ubi";
+
+			volumes {
+				ubi_fhdata: ubi-volume-fhdata {
+					volname = "fhdata";
+				};
+			};
+		};
+
+		/*
+		 * BOSA 校准表（FiberHome BDBOB 容器，2048 字节）。
+		 *
+		 * 本机实测该分区原本整块是 0xFF —— 厂商从没往这里拷过东西，
+		 * 而内核从这个 nvmem cell 读校准，不填就会读到 0xFF。
+		 * 内容已从 factory/fhdata 的 table 文件取出并写入本分区，
+		 * 写入后回读 crc32 = f1315e00，与 table 完全一致。
+		 *
+		 * table 里记录的模块型号是 ux3363。
+		 */
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x20000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			bosa_calibration: calibration@0 {
+				reg = <0x0 0x800>;
+			};
+		};
+
+		/*
+		 * 出厂身份数据。本机实测该分区同样是整块 0xFF（空的）。
+		 *
+		 * 偏移与长度沿用 HG5380A 的布局：
+		 *   +0x00 base MAC     +0x06 LAN/2.5G MAC
+		 *   +0x0C PON SN(8 字节，"FHTT"+4 字节)
+		 *   +0x14 PON MAC
+		 *
+		 * 但本机对应的取值来源是 factory/fhdata 里的 factory_conf：
+		 *   ManufacturerOUI = 24E3A4   （与实测 MAC 24-E3-A4-xx 一致）
+		 *   SerialNumber    = 3B83524E3A4B2DDDC
+		 * 这串序列号的格式与 HG5380A 的 "FHTT"+4 字节并不相同，
+		 * 映射关系还没确定，所以不能直接照抄 5380A 的写入逻辑。
+		 * 在此之前，identity 保持为空，MAC 由 base-files 另行处理。
+		 */
+		partition@ec20000 {
+			label = "identity";
+			reg = <0xec20000 0x20000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			fh_base_mac: mac-address@0 {
+				reg = <0x0 0x6>;
+			};
+
+			fh_lan_mac: mac-address@6 {
+				reg = <0x6 0x6>;
+			};
+
+			fh_pon_serial: pon-serial@c {
+				reg = <0xc 0x8>;
+			};
+
+			fh_pon_mac: mac-address@14 {
+				reg = <0x14 0x6>;
+			};
+		};
+	};
+};
+
+/*
+ * Root specification for the stock layout.
+ *
+ * RootfsB (mtd5) carries a squashfs; the overlay is a separate partition that
+ * fstools formats as JFFS2, selected by fstools_overlay_name.
+ *
+ * fstools/libfstools/mount_root.c does:
+ *
+ *     char *dataname = "rootfs_data";
+ *     if (get_var_from_file("/proc/cmdline", "fstools_overlay_name",
+ *                           dataparam, sizeof(dataparam)))
+ *             dataname = dataparam;
+ *
+ * so fstools_overlay_name=overlay makes fstools use the "overlay" partition
+ * instead of looking for one literally called rootfs_data.
+ *
+ * bootargs is written in full rather than with bootargs-append: the platform
+ * dtsi already has a bootargs-append and dtc keeps only one of them, which
+ * silently dropped the per-variant value.
+ */
+&fh_chosen {
+	bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce rootwait root=/dev/mtdblock5 rootfstype=squashfs fstools_overlay_name=overlay ubi.fm_autoconvert=1";
+};

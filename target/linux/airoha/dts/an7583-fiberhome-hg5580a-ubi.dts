@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * FiberHome HG5580A -- UBI layout.
+ *
+ * Hardware nodes come from an7583-fiberhome-hg5580a-common.dtsi; only the
+ * partition table differs from the stock variant.
+ *
+ * The flash keeps the stock FiberHome 10-partition table and UBI lives entirely
+ * inside "apps" (0x5f00000, 104 MiB).  Nothing outside that window is written
+ * by U-Boot, which is what keeps "factory" (MAC / PON serial / optical
+ * calibration) safe across a bootloader reflash.
+ *
+ * Pairs with the U-Boot in uboot-port/: it boots a FIT from the UBI "fit"
+ * volume, and fitblk releases that volume's rootfs as the root block device.
+ */
+
+#include "an7583-fiberhome-hg5580a-common.dtsi"
+#include "an758x-fiberhome-hg5580a-ubi-parts.dtsi"
+
+/ {
+	model = "FiberHome HG5580A (UBI)";
+	compatible = "fiberhome,hg5580a-ubi", "airoha,an7583";
+};
