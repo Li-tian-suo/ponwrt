@@ -217,6 +217,69 @@ ln -s /home/build/openwrt/dl /home/build/hg5380a/dl
 `configs/an7583.config` 的 `CONFIG_TARGET_ROOTFS_SQUASHFS=y`，
 产物是 `*squashfs-sysupgrade.bin`。
 
+### 5.4 编译被中断后的修复（0 字节产物）
+
+**现象**：`toolchain/gcc/final` 反复失败，两次报错不同：
+
+第一次：
+```
+libtool: install: `libstdc++.la' is not a valid libtool archive
+make[8]: *** [Makefile:730: install-toolexeclibLTLIBRARIES] Error 1
+```
+
+清理 `libstdc++.la` 后第二次：
+```
+make[5]: *** No rule to make target 'install'.  Stop.
+make[4]: *** [Makefile:13342: install-target-libvtv] Error 2
+```
+
+**根因**：编译进程被另一个并行编译挤掉（两个 `make -j12` 抢 19 GB
+内存），OpenWrt 的 `make install` 阶段被 SIGKILL 掐断，留下：
+
+```
+build_dir/.../gcc-14.4.0-final/                      ← 结构不完整
+  aarch64-openwrt-linux-musl/libvtv/                  ← 空目录，连 Makefile 都没有
+  aarch64-openwrt-linux-musl/libstdc++-v3/src/
+    libstdc++.la                                      ← 0 字节
+staging_dir/toolchain-.../aarch64-openwrt-linux-musl/lib/
+  libstdc++.la                                        ← 0 字节
+  libstdc++.so.6.0.33                                 ← 0 字节
+  libstdc++.so.6.0.33-gdb.py                          ← 0 字节
+```
+
+`libstdc++.a` 是完整的（32.6 MB），所以看起来像「快编完了」，
+实际上动态库和 libtool 描述文件全是空的。
+
+**关键点**：`libvtv` 那个空目录最坑——gcc 顶层 `configure` 被打断时
+没为它生成 Makefile，于是 `make install` 走到 `install-target-libvtv`
+时直接 `No rule to make target 'install'`。这个错误**不能靠删几个文件修**，
+必须让 gcc 重新 configure。
+
+**修法**（分两步，第二步是关键）：
+
+```sh
+# 1) 清掉 0 字节产物和 stamp
+TC=/home/build/hg5380a/staging_dir/toolchain-aarch64_cortex-a53_gcc-14.4.0_musl
+find "$TC" -size 0 -type f \( -name 'libstdc++*' -o -name 'libgcc*' \) -delete
+rm -f "$TC"/stamp/.gcc_final_*
+
+# 2) 删掉整个 final build 目录，让它重新 configure
+rm -rf /home/build/hg5380a/build_dir/toolchain-aarch64_cortex-a53_gcc-14.4.0_musl/gcc-14.4.0-final
+
+# 3) 重编（只重做 final，host 工具/initial/musl/binutils 都保留）
+su - build -c "cd /home/build/hg5380a && FORCE_UNSAFE_CONFIGURE=1 make toolchain/gcc/final/compile -j12"
+```
+
+**教训**：
+
+* 同一个 WSL 里**不要同时跑两个 `make -j12`**。19 GB 内存撑不住两套
+  OpenWrt 编译，被杀的那一边会留下 0 字节垃圾，错误信息还完全不指向
+  真正原因。
+* 判断「是否被中断」的方法：`find staging_dir -size 0 -type f`。
+  正常编译结束不该有 0 字节的库文件。
+* 遇到 `No rule to make target` 这类错误，先看对应子目录是否为空——
+  空目录说明 configure 没跑完，删目录重来比逐个补文件快。
+
 ---
 
 ## 六、待验证
