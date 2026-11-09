@@ -1,0 +1,144 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * FiberHome HG5580A - Airoha AN7583 ONU
+ *
+ * Hardware notes relevant to U-Boot:
+ *   SoC        Airoha AN7583 (2x Cortex-A53), 512 MiB DDR
+ *   NAND       Gigadevice S35ML02G3 SPI-NAND, 256 MiB, 2 KiB page, 128 B OOB
+ *   Serial     UART1 at 0x1fbf0000, 115200 8N1
+ *   PHY        Motorcomm YT8821 2.5G on lan1 (gdm3, MDIO 0x07)
+ *              MediaTek MT7530 switch on lan2..lan4 (gdm1)
+ *   Optical    Airoha UX3363 (paged BOSA, I2C 0x51)
+ *
+ * The generic U-Boot layout differs from the stock vendor one: BL2 lives in
+ * the first eraseblock and everything else (including the FIP) is inside a
+ * single "ubi" volume set, which is what the Web recovery and Install System
+ * paths expect.
+ */
+/dts-v1/;
+
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include "an7583.dtsi"
+
+/ {
+	model = "FiberHome HG5580A";
+	compatible = "fiberhome,hg5580a-ubi", "airoha,an7583";
+
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon";
+		stdout-path = "serial0:115200n8";
+		/*
+		 * Leave the first 2 MiB to the secure firmware at 0x80000000
+		 * (reserved in an7583.dtsi as atf@) and give Linux the rest.
+		 */
+		linux,usable-memory-range = <0x0 0x80200000 0x0 0x1fe00000>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x20000000>;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&an7583_pinctrl 35 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * These two are not indicators: they hold the YT8821 2.5G PHY
+		 * out of reset / powered.  The names are inherited from the
+		 * vendor device tree (which still says "an8811") and the
+		 * inverted polarity is intentional -- see the long comment in
+		 * the Linux DTS for the full explanation.
+		 */
+		phy_reset {
+			label = "an8811_reset";
+			gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		phy_tx_power_disable {
+			label = "phy_tx_power_disable";
+			gpios = <&an7583_pinctrl 15 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		/* Real front-panel LEDs. */
+		led_status {
+			label = "green:power";
+			gpios = <&an7583_pinctrl 6 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_pon {
+			label = "green:pon";
+			gpios = <&an7583_pinctrl 7 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_los {
+			label = "green:los";
+			gpios = <&an7583_pinctrl 8 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+};
+
+/*
+ * SPI-NAND.  U-Boot owns the whole flash through one "ubi" partition; BL2 is
+ * the only thing addressed directly at offset 0.
+ */
+&snfi {
+	status = "okay";
+};
+
+&spi_nand {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bl2";
+			reg = <0x0 0x20000>;
+		};
+
+		partition@20000 {
+			label = "ubi";
+			reg = <0x20000 0xffe0000>;
+		};
+	};
+};
+
+/* UX3363 paged BOSA and the factory EEPROM sit on i2c0. */
+&i2c0 {
+	status = "okay";
+};
+
+&i2c1 {
+	status = "okay";
+};
+
+/*
+ * gdm1 is the MT7530 switch CPU port; gdm3 is the YT8821 2.5G port on lan1.
+ * Both are needed for the U-Boot network stack, which the Web recovery and
+ * TFTP paths use.
+ */
+&gdm1 {
+	status = "okay";
+};
+
+&gdm3 {
+	status = "okay";
+};

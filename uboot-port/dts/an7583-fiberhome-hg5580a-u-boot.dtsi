@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * U-Boot specific additions for the FiberHome HG5580A.
+ *
+ * The UBI volume set that recovery and the Linux image share.  BL2 lives at
+ * offset 0 in its own "bl2" partition and is not part of UBI, so the volumes
+ * below start after it.
+ *
+ * Volume map (matches what the OpenWrt sysupgrade image expects):
+ *   fip          static  1 MiB   BL31 + U-Boot, rewritten by "Flash U-Boot"
+ *   fit          dynamic        production kernel+rootfs (sysupgrade payload)
+ *   rootfs_data  dynamic        writable overlay, recreated on install
+ *   bosa         dynamic  256 KiB  UX3363 calibration data
+ *   ri           dynamic  256 KiB  board identity (MAC, PON serial)
+ */
+
+#include "an758x-recovery-layout-u-boot.dtsi"
+
+status_led: &{/leds/led_status} {
+};
+
+#include "an758x-status-led-u-boot.dtsi"
+
+&recovery_layout {
+	bosa {
+		volume-name = "bosa";
+		volume-size = <0x40000>;
+		volume-type = "dynamic";
+		bootph-all;
+	};
+
+	ri {
+		volume-name = "ri";
+		volume-size = <0x40000>;
+		volume-type = "dynamic";
+		bootph-all;
+	};
+};
+
+/* The console UART has to be usable from the very first stage. */
+&uart1 {
+	bootph-all;
+};
+
+&snfi {
+	bootph-all;
+};
+
+&i2c0 {
+	bootph-all;
+};
