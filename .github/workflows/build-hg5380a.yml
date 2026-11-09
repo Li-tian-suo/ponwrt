@@ -108,6 +108,15 @@ jobs:
           CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-pon=y
+          # 上面 grep -v 把 an7583.config 里所有 =y 的包都清掉了，
+          # 连 uhttpd 也一起没了。luci-base 的 DEPENDS 里并不含 uhttpd，
+          # 携带 +uhttpd +uhttpd-mod-ubus 的是元包 luci-light。
+          # 只选 luci-mod-* 的结果就是：LuCI 文件全在、80 端口不监听、
+          # /etc/init.d/uhttpd 不存在，网页打不开。
+          # 因此必须选 luci-light，并显式再选一次 uhttpd 做双保险。
+          CONFIG_PACKAGE_luci-light=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
           CONFIG_PACKAGE_airoha-en8811h-firmware=y
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_htop=y
