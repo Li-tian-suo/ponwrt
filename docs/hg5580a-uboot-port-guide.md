@@ -23,21 +23,66 @@
 | `u-boot.bin` | 890,024 B | 纯 U-Boot，调试用 |
 | `u-boot.dtb` | 14,304 B | 设备树，调试用 |
 
-校验值：
+校验值（打上关闭验签补丁后的最终产物）：
 
 ```
-341e84c19a8e9c61d4b0c8ea52098c83  an7583-fiberhome-hg5580a-preloader.bin
-d7bec24a8b02477acda8b8e99b17d043  an7583-fiberhome-hg5580a-bl31-u-boot.fip
+95aeb9a1d9fd54ffcd3d77a47f316d63  an7583-fiberhome-hg5580a-preloader.bin
+7c3a8751f9e907260ad307ba49fad1b0  an7583-fiberhome-hg5580a-bl31-u-boot.fip
+1e767bc492197efe48f8e4d5b05a63e7  bl2.bin
+b45cca358745669a89c70290f32c7964  u-boot.bin
 ```
 
 FIP 内部构成（`fiptool info` 实测）：
 
 ```
-EL3 Runtime Firmware BL31:  offset=0x400   size=0xD622
+EL3 Runtime Firmware BL31:  offset=0x400   size=0xD621
 Non-Trusted Firmware BL33:  offset=0xDC00  size=0x4CBCB   ← U-Boot
 ```
 
-**未签名**（`FIP signing skipped (key environment unset)`）——这正是能绕过原厂校验的关键。
+**未签名**（`FIP signing skipped (key environment unset)`）。
+
+## 二之补充、与原厂 BL2 的兼容性（重要）
+
+**默认构建的 BL2 不兼容原厂 FIP，也不兼容自己的未签名 FIP。** 原因是
+`tf-a/make_helpers/defaults.mk:254` 无条件设置 `TRUSTED_BOARD_BOOT := 1`，
+BL2 会走 `load_auth_image()` 要求完整信任链。实测对比：
+
+```
+原厂 FIP（从 bootloader 备份 0x800 处提取，fiptool info）：
+  BL2 / BL31 / BL33
+  + trusted-key-cert / soc-fw-key-cert / nt-fw-key-cert
+  + tb-fw-cert / soc-fw-cert / nt-fw-cert        ← 6 张证书，完整签名
+
+本项目的 FIP：
+  BL31 / BL33                                     ← 0 张证书
+```
+
+四种组合：
+
+| BL2 | FIP | 结果 |
+| --- | --- | --- |
+| 原厂 | 原厂 | ✅ 正常工作 |
+| 原厂 | 本项目 | ❌ 缺 6 张证书，验签失败 |
+| 本项目（未打补丁） | 本项目 | ❌ 同样验签失败 |
+| 本项目（**打补丁**） | 本项目 | ✅ 见下 |
+
+修复方式：打两处补丁让 BL2 在运行时跳过验签，详见
+[hg5580a-uboot-disable-auth.md](hg5580a-uboot-disable-auth.md)。
+仓库里附了可直接执行的脚本：
+
+```sh
+sh uboot-port/patch-tfa-unsigned.sh <tf-a 源码树>
+```
+
+打完后反汇编可确认调用真的进去了：
+
+```
+$ arm-none-eabi-objdump -d bl2.elf | grep -A12 '<bl2_main>:'
+  81000e7c  bl  crypto_mod_init
+  81000e80  bl  auth_mod_init
+  81000e84  bl  dyn_disable_auth     ← 生效
+  81000e8c  bl  bl2_load_images
+```
 
 ## 三、x 模式救援（XMODEM）
 

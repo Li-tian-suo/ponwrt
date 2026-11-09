@@ -2,18 +2,35 @@
 /*
  * FiberHome HG5580A - Airoha AN7583 ONU
  *
- * Hardware notes relevant to U-Boot:
- *   SoC        Airoha AN7583 (2x Cortex-A53), 512 MiB DDR
- *   NAND       Gigadevice S35ML02G3 SPI-NAND, 256 MiB, 2 KiB page, 128 B OOB
+ * Hardware confirmed on real hardware (U-Boot banner + /api/device):
+ *   SoC        Airoha AN7583 (2x Cortex-A53)
+ *   DRAM       512 MiB @ 0x80000000
+ *   NAND       SkyHigh S35ML02G300 (ML02G300WH100), 256 MiB
+ *              block 128 KiB, page 2048, OOB 128
  *   Serial     UART1 at 0x1fbf0000, 115200 8N1
- *   PHY        Motorcomm YT8821 2.5G on lan1 (gdm3, MDIO 0x07)
- *              MediaTek MT7530 switch on lan2..lan4 (gdm1)
- *   Optical    Airoha UX3363 (paged BOSA, I2C 0x51)
+ *   PHY        Motorcomm YT8821 2.5G on gdm3 (OUI 0x13D47A, MDIO 0x07)
+ *   Switch     MediaTek MT7530 on gdm1
+ *   Optical    Airoha UX3363 paged BOSA, I2C 0x51
  *
- * The generic U-Boot layout differs from the stock vendor one: BL2 lives in
- * the first eraseblock and everything else (including the FIP) is inside a
- * single "ubi" volume set, which is what the Web recovery and Install System
- * paths expect.
+ * Partition layout
+ * ----------------
+ * The flash keeps the stock FiberHome layout.  Only the "apps" partition is
+ * handed to UBI, so the vendor bootloader, the A/B system slots and -- most
+ * importantly -- the "factory" partition (MAC addresses, PON serial, optical
+ * calibration) are never touched by a U-Boot reflash.
+ *
+ *   0x00000000  0x00280000  bootloader      vendor BL2 + FIP
+ *   0x00280000  0x00080000  bootflag        vendor A/B selector
+ *   0x00300000  0x00600000  KernelA
+ *   0x00900000  0x02800000  RootfsA
+ *   0x03100000  0x00600000  KernelB
+ *   0x03700000  0x02800000  RootfsB
+ *   0x05f00000  0x06800000  apps        -> UBI (104 MiB)
+ *   0x0c700000  0x01000000  frameworka
+ *   0x0d700000  0x01000000  frameworkb
+ *   0x0e700000  0x00500000  factory     -> never written
+ *
+ * UBI volumes live inside "apps": fip, fit, rootfs_data, bosa, ri.
  */
 /dts-v1/;
 
@@ -30,8 +47,8 @@
 		bootargs = "console=ttyS0,115200 earlycon";
 		stdout-path = "serial0:115200n8";
 		/*
-		 * Leave the first 2 MiB to the secure firmware at 0x80000000
-		 * (reserved in an7583.dtsi as atf@) and give Linux the rest.
+		 * The first 2 MiB at 0x80000000 are reserved for the secure
+		 * firmware (atf@ node in an7583.dtsi); hand the rest to Linux.
 		 */
 		linux,usable-memory-range = <0x0 0x80200000 0x0 0x1fe00000>;
 	};
@@ -56,11 +73,10 @@
 		compatible = "gpio-leds";
 
 		/*
-		 * These two are not indicators: they hold the YT8821 2.5G PHY
-		 * out of reset / powered.  The names are inherited from the
-		 * vendor device tree (which still says "an8811") and the
-		 * inverted polarity is intentional -- see the long comment in
-		 * the Linux DTS for the full explanation.
+		 * Not indicators: these two hold the YT8821 2.5G PHY out of
+		 * reset / powered.  Names come from the vendor device tree
+		 * (it still says "an8811") and the inverted polarity is
+		 * deliberate -- see the long comment in the Linux DTS.
 		 */
 		phy_reset {
 			label = "an8811_reset";
@@ -74,7 +90,7 @@
 			default-state = "on";
 		};
 
-		/* Real front-panel LEDs. */
+		/* Front-panel LEDs.  green:power is the activity LED. */
 		led_status {
 			label = "green:power";
 			gpios = <&an7583_pinctrl 6 GPIO_ACTIVE_LOW>;
@@ -96,8 +112,8 @@
 };
 
 /*
- * SPI-NAND.  U-Boot owns the whole flash through one "ubi" partition; BL2 is
- * the only thing addressed directly at offset 0.
+ * SPI-NAND.  The layout mirrors the stock one so nothing outside "apps" is
+ * ever written; U-Boot only ever formats the "apps" partition as UBI.
  */
 &snfi {
 	status = "okay";
@@ -110,13 +126,62 @@
 		#size-cells = <1>;
 
 		partition@0 {
-			label = "bl2";
-			reg = <0x0 0x20000>;
+			label = "bootloader";
+			reg = <0x0 0x280000>;
+			read-only;
 		};
 
-		partition@20000 {
+		partition@280000 {
+			label = "bootflag";
+			reg = <0x280000 0x80000>;
+			read-only;
+		};
+
+		partition@300000 {
+			label = "KernelA";
+			reg = <0x300000 0x600000>;
+			read-only;
+		};
+
+		partition@900000 {
+			label = "RootfsA";
+			reg = <0x900000 0x2800000>;
+			read-only;
+		};
+
+		partition@3100000 {
+			label = "KernelB";
+			reg = <0x3100000 0x600000>;
+		};
+
+		partition@3700000 {
+			label = "RootfsB";
+			reg = <0x3700000 0x2800000>;
+		};
+
+		/* The only partition U-Boot formats and manages. */
+		partition@5f00000 {
 			label = "ubi";
-			reg = <0x20000 0xffe0000>;
+			reg = <0x5f00000 0x6800000>;
+		};
+
+		partition@c700000 {
+			label = "frameworka";
+			reg = <0xc700000 0x1000000>;
+			read-only;
+		};
+
+		partition@d700000 {
+			label = "frameworkb";
+			reg = <0xd700000 0x1000000>;
+			read-only;
+		};
+
+		/* MAC / PON serial / optical calibration.  Never written. */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
 		};
 	};
 };
@@ -131,9 +196,9 @@
 };
 
 /*
- * gdm1 is the MT7530 switch CPU port; gdm3 is the YT8821 2.5G port on lan1.
- * Both are needed for the U-Boot network stack, which the Web recovery and
- * TFTP paths use.
+ * gdm1 is the MT7530 switch CPU port (lan2..lan4); gdm3 is the YT8821 2.5G
+ * port on lan1.  Both are needed by the U-Boot network stack, which the Web
+ * recovery and TFTP paths use.
  */
 &gdm1 {
 	status = "okay";

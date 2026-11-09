@@ -1,0 +1,379 @@
+name: Build HG5580A UBI + U-Boot (AN7583 FiberHome)
+
+# End-to-end build for the UBI layout, paired with our own U-Boot.
+#
+# Why a second workflow instead of extending build-hg5580a.yml
+# ------------------------------------------------------------
+# build-hg5580a.yml targets device/fiberhome_hg5580a, which produces a vendor
+# KernelX container (mtd-kernel.bin + mtd-rootfs.bin) for the STOCK U-Boot
+# 2023.04's `ldkernel`.  That layout is now superseded: on real hardware
+# (verified) the flash keeps the stock 10-partition table and UBI lives inside
+# the `apps` partition at 0x5f00000 (104 MiB).  The matching firmware is
+# device/fiberhome_hg5580a-ubi, whose sysupgrade payload is a single .itb that
+# our U-Boot boots from the `fit` volume.
+#
+# This workflow therefore builds two things that must ship together:
+#
+#   firmware  bin/targets/airoha/an7583/*-ubi-squashfs-sysupgrade.itb
+#             bin/targets/airoha/an7583/*-ubi-initramfs-recovery.itb
+#
+#   bootloader  an7583-fiberhome-hg5580a-preloader.bin   (BL2, FIP-wrapped)
+#               an7583-fiberhome-hg5580a-bl31-u-boot.fip  (BL31 + U-Boot)
+#
+# The bootloader half comes from uboot-port/, which carries the board support
+# (defconfig / env / DTS) plus patch-tfa-unsigned.sh.
+#
+# Two facts about the bootloader that cost real debugging time
+# -----------------------------------------------------------
+# 1. tf-a/make_helpers/defaults.mk sets TRUSTED_BOARD_BOOT := 1 unconditionally,
+#    so BL2 calls load_auth_image() and demands a chain of trust.  The stock FIP
+#    carries six certificates; ours carries none, so verification fails and BL2
+#    aborts with "Authentication failed".
+#    patch-tfa-unsigned.sh injects dyn_disable_auth() into bl2_main.c and
+#    registers TCSUPPORT_DISABLE_AUTH as a compiler define (the second half is
+#    the part that is easy to miss -- TCSUPPORT_* variables are not turned into
+#    -D flags unless add_define names them in tf-a/Makefile).
+#
+# 2. MBEDTLS_DIR must point at a complete source tree that still has
+#    library/hash_info.c.  tf-a/drivers/auth/mbedtls/mbedtls_common.mk refers to
+#    that file by name and mbedtls 3.6.x removed it, so only 3.4.x works.
+#    An OpenWrt build_dir/.../mbedtls-* tree looks like source but is CMake
+#    configured and lacks the file.
+on:
+  push:
+    branches:
+      - master
+      - Ponwrt-5380A
+    paths:
+      - 'uboot-port/**'
+      - 'board/an7583-fiberhome-hg5580a.dts'
+      - 'target/linux/airoha/**'
+      - 'configs/hg5580a-packages.config'
+      - '.github/workflows/build-hg5580a-ubi.yml'
+  workflow_dispatch:
+    inputs:
+      build_uboot:
+        description: '同时编译 U-Boot + TF-A（约多 10 分钟）'
+        type: boolean
+        default: true
+
+concurrency:
+  group: hg5580a-ubi-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Pinned so the patched TF-A always finds hash_info.c.
+  MBEDTLS_VER: mbedtls-3.4.1
+  UBOOT_REPO: https://github.com/pbs05/uboot-an758x
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 350
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+                      /opt/hostedtoolcache/CodeQL /usr/local/share/boost
+          sudo apt-get clean
+          df -h /
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang flex bison g++ gawk \
+            gcc-multilib g++-multilib gettext git libncurses5-dev libssl-dev \
+            python3-setuptools rsync swig unzip zlib1g-dev file wget \
+            device-tree-compiler gcc-arm-none-eabi libnewlib-arm-none-eabi \
+            u-boot-tools
+          df -h /
+
+      # ------------------------------------------------------------------
+      # Firmware: the UBI device variant
+      # ------------------------------------------------------------------
+      - name: Apply board files
+        run: |
+          # image/Makefile uses DEVICE_DTS_DIR := ../dts, so the DTS must land
+          # in target/linux/airoha/dts/; the board/ copy is only the source.
+          test -f board/an7583-fiberhome-hg5580a.dts
+          cp board/an7583-fiberhome-hg5580a.dts target/linux/airoha/dts/
+
+          # Register Device/fiberhome_hg5580a-ubi exactly once.
+          python3 - <<'PY'
+          import re, pathlib, sys
+          p = pathlib.Path('target/linux/airoha/image/an7583.mk')
+          s = p.read_text()
+
+          marker = 'define Device/fiberhome_hg5580a-ubi'
+          if marker in s:
+              print('definition already present, leaving it alone')
+              sys.exit(0)
+
+          snippet = pathlib.Path('board/hg5580a-ubi.mk.snippet')
+          if not snippet.is_file():
+              sys.exit('ERROR: board/hg5580a-ubi.mk.snippet is missing')
+          p.write_text(s.rstrip('\n') + '\n\n' + snippet.read_text())
+          print('appended fiberhome_hg5580a-ubi definition')
+          PY
+
+          n_def=$(grep -c '^define Device/fiberhome_hg5580a-ubi$' \
+                    target/linux/airoha/image/an7583.mk || true)
+          n_td=$(grep -c '^TARGET_DEVICES += fiberhome_hg5580a-ubi$' \
+                    target/linux/airoha/image/an7583.mk || true)
+          echo "define=$n_def TARGET_DEVICES=$n_td"
+          [ "$n_def" = "1" ] && [ "$n_td" = "1" ] || {
+            echo "::error::fiberhome_hg5580a-ubi must be defined exactly once"; exit 1; }
+
+          # The UBI variant is useless without fitblk: it is what releases the
+          # rootfs carried inside the uImage.FIT as a block device.
+          if ! sed -n '/define Device\/fiberhome_hg5580a-ubi/,/^TARGET_DEVICES += fiberhome_hg5580a-ubi/p' \
+                 target/linux/airoha/image/an7583.mk \
+               | sed 's/#.*//' | grep -q 'fitblk'; then
+            echo "::error::hg5580a-ubi block lacks fitblk"; exit 1
+          fi
+
+      - name: Trim feeds
+        run: |
+          sed -i '/^src-git video /d; /^src-git telephony /d' feeds.conf.default
+          cat feeds.conf.default
+
+      - name: Fix exec bits
+        run: |
+          chmod +x scripts/* config/* 2>/dev/null || true
+          find . -maxdepth 3 -name '*.sh' -not -path './build_dir/*' \
+               -not -path './staging_dir/*' -exec chmod +x {} + 2>/dev/null || true
+
+      - name: Update feeds
+        run: ./scripts/feeds update -a
+
+      - name: Patch pon-drivers for AN7583
+        run: |
+          # airoha-paged-bosa only declares @TARGET_airoha_an7581 upstream, so it
+          # is invisible on AN7583; without it the UX3363 BOSA has no driver and
+          # pon0 never appears.
+          f=feeds/pon_drivers/airoha-pon-frontends/Makefile
+          test -f "$f" || { echo "::error::$f missing"; exit 1; }
+          patch -p1 -d feeds/pon_drivers < board/airoha-paged-bosa-an7583.patch
+          n=$(grep -c 'TARGET_airoha_an7583' "$f")
+          [ "$n" = "3" ] || { echo "::error::expected 3 AN7583 packages, got $n"; exit 1; }
+          echo "OK: all three PON frontend packages support AN7583"
+
+      - name: Provide libffi
+        run: |
+          git clone --depth 1 --filter=blob:none --sparse \
+            https://github.com/openwrt/openwrt /tmp/owrt
+          git -C /tmp/owrt sparse-checkout set package/libs/libffi
+          mkdir -p package/libs
+          cp -a /tmp/owrt/package/libs/libffi package/libs/
+
+      - name: Install feeds
+        run: ./scripts/feeds install -a
+
+      - name: Drop packages with Kconfig recursion
+        run: |
+          for d in feeds/packages/net/fwknop \
+                   feeds/packages/sound/squeezelite \
+                   feeds/luci/applications/luci-app-fwknopd; do
+            if [ -e "$d" ]; then rm -rf "$d"; echo "removed $d"; else echo "absent $d"; fi
+          done
+          rm -rf package/feeds/packages/fwknop \
+                 package/feeds/packages/squeezelite \
+                 package/feeds/luci/luci-app-fwknopd 2>/dev/null || true
+
+      - name: Configure (UBI variant)
+        run: |
+          cp configs/an7583.config .config
+
+          # Drop every device selection, then pick the UBI variant explicitly.
+          sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
+          echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5580a-ubi=y' >> .config
+
+          if [ -f configs/hg5580a-packages.config ]; then
+            grep '^CONFIG_PACKAGE_' configs/hg5580a-packages.config >> .config || true
+          fi
+
+          cat >> .config <<'EOF'
+          CONFIG_PACKAGE_kmod-phy-motorcomm=y
+          CONFIG_PACKAGE_kmod-phy-airoha-en8811h=y
+          CONFIG_PACKAGE_kmod-airoha-paged-bosa=y
+          CONFIG_PACKAGE_kmod-airoha-en7572=y
+          CONFIG_PACKAGE_kmod-airoha-xpon=y
+          CONFIG_PACKAGE_airoha-ponctl=y
+          CONFIG_PACKAGE_airoha-pond=y
+          CONFIG_PACKAGE_luci-app-pon=y
+          CONFIG_PACKAGE_airoha-en8811h-firmware=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_fitblk=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-light=y
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_htop=y
+          EOF
+          sed -i 's/^ *//' .config
+
+          # sing-box's NAIVE_OUTBOUND is def_bool y, which makes the build pull
+          # libcronet and stall on a Chromium toolchain download.  Turn it off
+          # before defconfig so the dependency edge never forms.
+          sed -i 's/^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=y$/# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set/' .config
+
+          make defconfig
+          # defconfig can re-enable NAIVE_OUTBOUND; force it off again.
+          sed -i 's/^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=y$/# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set/' .config
+          make prepare-tmpinfo
+
+          echo "--- device selection ---"
+          grep -E '^CONFIG_TARGET_DEVICE_airoha.*=y' .config || {
+            echo "::error::no airoha device selected"; exit 1; }
+          grep -q '^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5580a-ubi=y' .config || {
+            echo "::error::UBI variant not selected"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_fitblk=y' .config || {
+            echo "::error::fitblk not selected"; exit 1; }
+          grep -q '^CONFIG_PACKAGE_kmod-airoha-paged-bosa=y' .config || {
+            echo "::error::kmod-airoha-paged-bosa not selected"; exit 1; }
+          echo "--- package count ---"
+          grep -c '^CONFIG_PACKAGE_.*=y' .config || true
+
+      - name: Download sources
+        run: make download -j8 || true
+
+      - name: Compile firmware
+        run: make -j$(nproc) || (make -j1 V=s 2>&1 | tail -n 300; false)
+
+      - name: Verify firmware
+        run: |
+          IMG=bin/targets/airoha/an7583
+          ls -l "$IMG" || true
+          for pat in '*-ubi-squashfs-sysupgrade.itb' '*-ubi-initramfs-recovery.itb'; do
+            n=$(find "$IMG" -maxdepth 1 -name "$pat" | wc -l)
+            echo "$pat -> $n"
+            [ "$n" -ge 1 ] || { echo "::error::missing $pat"; exit 1; }
+          done
+
+      # ------------------------------------------------------------------
+      # Bootloader: U-Boot + TF-A from uboot-port/
+      # ------------------------------------------------------------------
+      - name: Fetch U-Boot sources
+        if: ${{ inputs.build_uboot != false }}
+        run: |
+          git clone --depth 1 "$UBOOT_REPO" /tmp/uboot
+          echo "uboot HEAD: $(git -C /tmp/uboot rev-parse --short HEAD)"
+
+          # Board support: four files plus a build-script entry.
+          cp uboot-port/configs/an7583_fiberhome_hg5580a_defconfig /tmp/uboot/configs/
+          cp uboot-port/board/an7583_fiberhome_hg5580a.env /tmp/uboot/board/airoha/an7583/
+          cp uboot-port/dts/an7583-fiberhome-hg5580a.dts /tmp/uboot/arch/arm/dts/
+          cp uboot-port/dts/an7583-fiberhome-hg5580a-u-boot.dtsi /tmp/uboot/arch/arm/dts/
+
+          python3 - <<'PY'
+          import pathlib, sys
+          p = pathlib.Path('/tmp/uboot/scripts/build-an758x.sh')
+          s = p.read_text()
+          if 'hg5580a)' in s:
+              print('already registered')
+              sys.exit(0)
+          s = s.replace('usage: build-an758x.sh <hg5382a|',
+                        'usage: build-an758x.sh <hg5580a|hg5382a|', 1)
+          block = ('hg5580a)\n\tdefconfig=an7583_fiberhome_hg5580a_defconfig\n'
+                   '\tartifact_prefix=an7583-fiberhome-hg5580a\n\tsoc=AN7583\n'
+                   '\tparallel_nand=0\n\t;;\n')
+          s = s.replace('xg-040g-mf)\n', block + 'xg-040g-mf)\n', 1)
+          p.write_text(s)
+          print('registered hg5580a target')
+          PY
+
+          sh uboot-port/patch-tfa-unsigned.sh /tmp/uboot/tf-a
+
+      - name: Fetch mbedtls 3.4.1
+        if: ${{ inputs.build_uboot != false }}
+        run: |
+          # TF-A's mbedtls_common.mk names library/hash_info.c, which 3.6.x
+          # removed.  Anything else fails with
+          #   No rule to make target '.../library/hash_info.c'
+          curl -fsSL -o /tmp/mbedtls.tar.gz \
+            "https://codeload.github.com/Mbed-TLS/mbedtls/tar.gz/refs/tags/${MBEDTLS_VER}"
+          mkdir -p /tmp/mbedtls
+          tar -xzf /tmp/mbedtls.tar.gz -C /tmp/mbedtls --strip-components=1
+          test -f /tmp/mbedtls/library/hash_info.c || {
+            echo "::error::mbedtls tree lacks library/hash_info.c"; exit 1; }
+          grep -o 'MBEDTLS_VERSION_STRING_FULL.*' /tmp/mbedtls/include/mbedtls/build_info.h | head -1
+
+      - name: Build U-Boot + TF-A
+        if: ${{ inputs.build_uboot != false }}
+        run: |
+          TC="$PWD/staging_dir/toolchain-aarch64_cortex-a53_gcc-14.4.0_musl"
+          export CROSS_COMPILE="$TC/bin/aarch64-openwrt-linux-musl-"
+          export STAGING_DIR="$TC"
+          export ARM32_CROSS_COMPILE=/usr/bin/arm-none-eabi-
+          export MBEDTLS_DIR=/tmp/mbedtls
+          export BUILD_JOBS=$(nproc)
+          export PATH="$TC/bin:$PATH"
+
+          "$CROSS_COMPILE"gcc --version | head -1
+          arm-none-eabi-gcc --version | head -1
+
+          cd /tmp/uboot
+          ./scripts/build-an758x.sh hg5580a 2>&1 | tail -60
+
+          echo "--- artifacts ---"
+          ls -l output/hg5580a/
+
+          # The signing step is skipped without a key, which is exactly what we
+          # want: the patched BL2 accepts an unsigned FIP.
+          test -f output/hg5580a/an7583-fiberhome-hg5580a-preloader.bin
+          test -f output/hg5580a/an7583-fiberhome-hg5580a-bl31-u-boot.fip
+
+      - name: Verify BL2 skips verification
+        if: ${{ inputs.build_uboot != false }}
+        run: |
+          # The whole point of patch-tfa-unsigned.sh: bl2_main must call
+          # dyn_disable_auth().  Without the define registration the call
+          # compiles away and BL2 would reject our certificate-less FIP.
+          ELF=/tmp/uboot/build/hg5580a/tf-a/build/en7523/release/bl2/bl2.elf
+          objdump -d "$ELF" | awk '/<bl2_main>:/{f=1} f{print} f&&/^$/{c++} c>1{exit}' > /tmp/bl2main.txt
+          cat /tmp/bl2main.txt
+          if grep -q 'dyn_disable_auth' /tmp/bl2main.txt; then
+            echo "OK: bl2_main calls dyn_disable_auth"
+          else
+            echo "::error::bl2_main does not call dyn_disable_auth - unsigned FIP will be rejected"
+            exit 1
+          fi
+
+      - name: Stage bootloader artifacts
+        if: ${{ inputs.build_uboot != false }}
+        run: |
+          DEST=bin/targets/airoha/an7583
+          mkdir -p "$DEST"
+          cp /tmp/uboot/output/hg5580a/an7583-fiberhome-hg5580a-preloader.bin   "$DEST/"
+          cp /tmp/uboot/output/hg5580a/an7583-fiberhome-hg5580a-bl31-u-boot.fip "$DEST/"
+          cp /tmp/uboot/output/hg5580a/u-boot.bin                               "$DEST/uboot.bin"
+          cp /tmp/uboot/output/hg5580a/u-boot.dtb                               "$DEST/uboot.dtb"
+          ( cd "$DEST" && md5sum an7583-fiberhome-hg5580a-* > bootloader.md5 )
+          ls -l "$DEST"
+
+      - name: List artifacts
+        if: always()
+        run: find bin/targets/airoha/an7583 -maxdepth 1 -type f -printf '%f  %s\n' 2>/dev/null || true
+
+      - name: Upload firmware
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: hg5580a-ubi
+          if-no-files-found: warn
+          path: |
+            bin/targets/airoha/an7583/*-ubi-*
+            bin/targets/airoha/an7583/an7583-fiberhome-hg5580a-*
+            bin/targets/airoha/an7583/uboot.bin
+            bin/targets/airoha/an7583/uboot.dtb
+            bin/targets/airoha/an7583/bootloader.md5
+            bin/targets/airoha/an7583/*.manifest
+            bin/targets/airoha/an7583/config.buildinfo

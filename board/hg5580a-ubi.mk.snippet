@@ -1,0 +1,40 @@
+
+# ---------------------------------------------------------------------------
+# FiberHome HG5580A (UBI) -- pairs with the U-Boot in uboot-port/.
+#
+# The flash keeps the stock FiberHome 10-partition layout.  UBI lives entirely
+# inside the "apps" partition (0x5f00000, 104 MiB), so a U-Boot reflash never
+# touches "factory" (MAC / PON serial / optical calibration), "bootloader", or
+# the A/B system slots.
+#
+# Verified on hardware: apps -> UBI carries
+#   fip / ubootenv / ubootenv2 / bosa / ri   plus rootfs_data created at install
+#
+# Differences from Device/fiberhome_hg5580a (the stock-layout variant):
+#   * no vendor KernelX container -- our U-Boot boots a FIT directly
+#   * kernel and U-Boot environment live in UBI volumes, not raw partitions
+#   * the payload is a single .itb matching the env's bootfile_upg
+# ---------------------------------------------------------------------------
+define Device/fiberhome_hg5580a-ubi
+  $(call Device/FitImageLzma)
+  DEVICE_VENDOR := FiberHome
+  DEVICE_MODEL := HG5580A
+  DEVICE_VARIANT := (UBI)
+  DEVICE_DTS := an7583-fiberhome-hg5580a
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  UBOOTENV_IN_UBI := 1
+  KERNEL_IN_UBI := 1
+  KERNEL := kernel-bin | gzip
+  KERNEL_INITRAMFS := kernel-bin | lzma | \
+	fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 128k
+  KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+  IMAGES := sysupgrade.itb
+  IMAGE/sysupgrade.itb := append-kernel | \
+	fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \
+	append-metadata
+  DEVICE_PACKAGES := kmod-phy-motorcomm \
+	kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
+	airoha-ponctl airoha-pond fitblk
+endef
+TARGET_DEVICES += fiberhome_hg5580a-ubi
