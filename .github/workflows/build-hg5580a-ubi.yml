@@ -61,6 +61,11 @@ concurrency:
   group: hg5580a-ubi-${{ github.ref }}
   cancel-in-progress: true
 
+# Needed by softprops/action-gh-release to attach files to a release.  The
+# default token is read-only in many repos since 2023.
+permissions:
+  contents: write
+
 env:
   # Pinned so the patched TF-A always finds hash_info.c.
   MBEDTLS_VER: mbedtls-3.4.1
@@ -312,6 +317,13 @@ jobs:
 
           sh uboot-port/patch-tfa-unsigned.sh /tmp/uboot/tf-a
 
+          # Web recovery enhancement: "Download all" plus a per-file MD5 so a
+          # restore can be verified.  Shipped as a diff against upstream's
+          # net/lwip/httpd-page.html.
+          patch -p1 -d /tmp/uboot < uboot-port/patches/web-backup.diff
+          grep -q 'backupAllButton' /tmp/uboot/net/lwip/httpd-page.html || {
+            echo "::error::web backup patch did not apply"; exit 1; }
+
       - name: Fetch mbedtls 3.4.1
         if: ${{ inputs.build_uboot != false }}
         run: |
@@ -397,3 +409,108 @@ jobs:
             bin/targets/airoha/an7583/bootloader.md5
             bin/targets/airoha/an7583/*.manifest
             bin/targets/airoha/an7583/config.buildinfo
+
+      # ------------------------------------------------------------------
+      # Publish a release.
+      #
+      # Only on a tag push (v*) or an explicit workflow_dispatch run, so ordinary
+      # commits do not create releases.  The body is generated here rather than
+      # written by hand so the checksums always match the attached files.
+      # ------------------------------------------------------------------
+      - name: Collect release files
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        run: |
+          IMG=bin/targets/airoha/an7583
+          REL=release
+          rm -rf "$REL"; mkdir -p "$REL"
+
+          for f in "$IMG"/*-ubi-squashfs-sysupgrade.itb \
+                   "$IMG"/*-ubi-initramfs-recovery.itb \
+                   "$IMG"/an7583-fiberhome-hg5580a-preloader.bin \
+                   "$IMG"/an7583-fiberhome-hg5580a-bl31-u-boot.fip; do
+            [ -f "$f" ] && cp "$f" "$REL/" || true
+          done
+
+          ( cd "$REL" && sha256sum * > SHA256SUMS.txt && md5sum * > MD5SUMS.txt )
+          ls -l "$REL"
+          cat "$REL/SHA256SUMS.txt"
+
+      - name: Compose release notes
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        run: |
+          {
+            echo "## PonWrt for FiberHome HG5580A"
+            echo ""
+            echo "Airoha AN7583 XG-PON ONU · SkyHigh ML02G300WH100 256 MiB SPI-NAND"
+            echo "U-Boot 2026.07 + TF-A 2.10 · UBI layout inside the stock \`apps\` partition"
+            echo ""
+            echo "### Files"
+            echo ""
+            echo "| file | size | purpose |"
+            echo "| --- | --- | --- |"
+            for f in release/*; do
+              n=$(basename "$f")
+              s=$(stat -c %s "$f")
+              case "$n" in
+                *sysupgrade*|*squashfs*) p="system firmware (write to UBI \`fit\`)" ;;
+                *initramfs*)             p="recovery / RAM boot, does not touch flash" ;;
+                *preloader*)             p="BL2, write to NAND offset 0x0" ;;
+                *fip)                    p="BL31 + U-Boot, write to UBI \`fip\`" ;;
+                *SUMS*)                  p="checksums" ;;
+                *)                       p="" ;;
+              esac
+              echo "| \`$n\` | $s | $p |"
+            done
+            echo ""
+            echo "### Partition layout"
+            echo ""
+            echo "The stock FiberHome 10-partition table is kept. UBI lives entirely"
+            echo "inside \`apps\` (0x5f00000, 104 MiB), so **\`factory\` is never written**."
+            echo ""
+            echo '```'
+            echo "0x0000000 0x280000  bootloader    stock BL2+FIP"
+            echo "0x0280000 0x080000  bootflag      stock A/B selector"
+            echo "0x0300000 0x600000  KernelA       stock slot A"
+            echo "0x0900000 0x2800000 RootfsA       stock slot A"
+            echo "0x3100000 0x600000  KernelB       stock slot B"
+            echo "0x3700000 0x2800000 RootfsB       stock slot B"
+            echo "0x5f00000 0x6800000 apps      ->  UBI (104 MiB)"
+            echo "0xc700000 0x1000000 frameworka"
+            echo "0xd700000 0x1000000 frameworkb"
+            echo "0xe700000 0x500000  factory       never written"
+            echo '```'
+            echo ""
+            echo "### Install"
+            echo ""
+            echo "Back up \`factory\` first, then in the U-Boot Web UI at http://192.168.0.1/:"
+            echo ""
+            echo "1. **Rebuild UBI** — formats \`apps\`, creates fip/ubootenv/bosa/ri"
+            echo "2. **Flash U-Boot** — write the \`.fip\` into the UBI \`fip\` volume"
+            echo "3. **Install system** — write the \`.itb\` into the UBI \`fit\` volume"
+            echo "4. **Boot system**"
+            echo ""
+            echo "Flash \`preloader.bin\` last: it replaces the bootloader partition and is"
+            echo "the only step that can require XMODEM recovery."
+            echo ""
+            echo "Full guide: [docs/hg5580a-flash-guide.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/hg5580a-flash-guide.md)"
+            echo ""
+            echo "### Checksums"
+            echo ""
+            echo '```'
+            cat release/SHA256SUMS.txt
+            echo '```'
+          } > release-notes.md
+          cat release-notes.md
+
+      - name: Create release
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('hg5580a-ubi-{0}', github.run_number) }}
+          name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('HG5580A UBI build {0}', github.run_number) }}
+          body_path: release-notes.md
+          files: |
+            release/*
+          draft: false
+          prerelease: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          fail_on_unmatched_files: false
