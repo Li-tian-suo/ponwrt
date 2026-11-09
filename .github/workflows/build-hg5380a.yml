@@ -66,7 +66,7 @@ jobs:
           # 因为旧定义已经存在，grep 命中，snippet 永远不会被追加。
           # 改为：先精确删掉旧块（含 TARGET_DEVICES 行，避免重复注册），再追加。
           python3 - <<'PY'
-          import re, pathlib, sys
+          import re, pathlib
           p = pathlib.Path('target/linux/airoha/image/an7583.mk')
           s = p.read_text()
           pat = re.compile(
@@ -74,11 +74,18 @@ jobs:
               r'TARGET_DEVICES \+= fiberhome_hg5380a\n'
           )
           new, n = pat.subn('', s, count=1)
-          if n != 1:
-              sys.exit('ERROR: 未找到旧的 Device/fiberhome_hg5380a 定义，'
-                       '请检查 an7583.mk 结构是否变化')
-          p.write_text(new)
-          print('removed old Device/fiberhome_hg5380a block')
+          if n == 1:
+              p.write_text(new)
+              print('removed old Device/fiberhome_hg5380a block')
+          else:
+              # 两种仓库状态都要能跑：
+              #   ponwrt-hg5380a 的 an7583.mk 里写过一份旧定义（需要先删，
+              #     否则会和下面追加的 snippet 重复注册 TARGET_DEVICES）
+              #   同步上游后的 ponwrt master 的 an7583.mk 是干净的上游版本，
+              #     里面从来没有 fiberhome_hg5380a，直接追加即可
+              # 原来这里在 n != 1 时直接 exit，导致干净上游版本一进来就失败。
+              print('no old Device/fiberhome_hg5380a block (clean upstream tree), '
+                    'skip removal')
           PY
 
           cat board/an7583.mk.snippet >> target/linux/airoha/image/an7583.mk
