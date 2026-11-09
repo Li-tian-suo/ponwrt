@@ -148,7 +148,19 @@ jobs:
           test -f "$f" || { echo "::error::$f 不存在，feed 结构变了"; exit 1; }
           echo "--- 打补丁前 ---"
           grep -n 'DEPENDS' "$f"
-          patch -p1 -d feeds/pon_drivers < board/airoha-paged-bosa-an7583.patch
+          # --forward --batch：
+          #   --forward 已应用过就跳过，不反向回退
+          #   --batch   出错时不交互提问。少了它，patch 遇到「已应用过」会打印
+          #             "Reversed (or previously applied) patch detected!
+          #              Assume -R? [n]" 并等 stdin，在非交互环境里永久阻塞。
+          #             CI 每次是干净 checkout 通常不会触发，但本地重跑就会卡死。
+          if patch -p1 -d feeds/pon_drivers --forward --batch \
+                   < board/airoha-paged-bosa-an7583.patch; then
+            echo "patch 应用成功"
+          else
+            echo "patch 返回非 0（可能已应用过），继续校验结果"
+          fi
+          rm -f feeds/pon_drivers/airoha-pon-frontends/Makefile.rej 2>/dev/null || true
           echo "--- 打补丁后 ---"
           grep -n 'DEPENDS' "$f"
           n=$(grep -c 'TARGET_airoha_an7583' "$f")
