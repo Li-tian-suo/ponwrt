@@ -20,7 +20,10 @@ define Device/fiberhome_hg5580a-ubi
   DEVICE_VENDOR := FiberHome
   DEVICE_MODEL := HG5580A
   DEVICE_VARIANT := (UBI)
-  DEVICE_DTS := an7583-fiberhome-hg5580a
+  # Must point at the UBI device tree, not the stock one: the stock variant
+  # describes 14 partitions with a JFFS2 overlay and bootargs pointing at
+  # root=/dev/mtdblock5, neither of which exists on the UBI layout.
+  DEVICE_DTS := an7583-fiberhome-hg5580a-ubi
   BLOCKSIZE := 128k
   PAGESIZE := 2048
   UBOOTENV_IN_UBI := 1

@@ -101,14 +101,37 @@ jobs:
       # ------------------------------------------------------------------
       - name: Apply board files
         run: |
-          # image/Makefile uses DEVICE_DTS_DIR := ../dts, so the DTS must land
-          # in target/linux/airoha/dts/; the board/ copy is only the source.
-          test -f board/an7583-fiberhome-hg5580a.dts
-          cp board/an7583-fiberhome-hg5580a.dts target/linux/airoha/dts/
+          # image/Makefile uses DEVICE_DTS_DIR := ../dts, so the DTS files must
+          # land in target/linux/airoha/dts/; the board/ copies are only the
+          # source of truth in git.
+          #
+          # The device tree was split so the stock and UBI layouts can share one
+          # hardware description.  All four files are needed -- DEVICE_DTS for
+          # the UBI variant is an7583-fiberhome-hg5580a-ubi, which includes the
+          # common dtsi and the UBI parts dtsi.
+          for f in an7583-fiberhome-hg5580a-common.dtsi \
+                   an7583-fiberhome-hg5580a.dts \
+                   an7583-fiberhome-hg5580a-ubi.dts \
+                   an758x-fiberhome-hg5580a-stock-parts.dtsi \
+                   an758x-fiberhome-hg5580a-ubi-parts.dtsi; do
+            test -f "target/linux/airoha/dts/$f" || {
+              echo "::error::target/linux/airoha/dts/$f is missing"; exit 1; }
+          done
+          echo "all DTS files present"
+
+          # Sanity: the UBI device tree must describe the UBI layout, not the
+          # stock one.  This caught a real bug where DEVICE_DTS pointed at the
+          # stock dts and the image shipped with root=/dev/mtdblock5.
+          grep -q 'compatible = "linux,ubi"' \
+            target/linux/airoha/dts/an758x-fiberhome-hg5580a-ubi-parts.dtsi || {
+            echo "::error::UBI parts dtsi does not declare linux,ubi"; exit 1; }
+          grep -q 'ubi.block=0,fit' \
+            target/linux/airoha/dts/an758x-fiberhome-hg5580a-ubi-parts.dtsi || {
+            echo "::error::UBI bootargs missing ubi.block=0,fit"; exit 1; }
 
           # Register Device/fiberhome_hg5580a-ubi exactly once.
           python3 - <<'PY'
-          import re, pathlib, sys
+          import pathlib, sys
           p = pathlib.Path('target/linux/airoha/image/an7583.mk')
           s = p.read_text()
 
