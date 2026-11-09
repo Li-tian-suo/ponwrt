@@ -1,0 +1,711 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * FiberHome HG5580A — Airoha AN7583
+ *
+ * 这份 DTS 以 HG5380A 的移植成果（board/an7583-fiberhome-hg5380a.dts）为底稿，
+ * 按本机原厂 KernelA 里 DTB 的反编译结果（备份见
+ * backup/vendor-an7583-hg5580a.dtb / .dts，15704 字节，位于 KernelA 0x3100）
+ * 逐条校对后修改。
+ *
+ * 硬件已确认的共同点（来自原厂 DTB / U-Boot / Linux 启动日志）：
+ *   - SoC AN7583，512 MiB DDR，SPI-NAND FORESEE F35SQB002G (0xCD/0x52)
+ *   - 10 个原厂分区，偏移与 HG5380A 完全一致
+ *   - BOSA 在 i2c0 地址 0x51（分页 0x7f，chip id 读 0xA4）
+ *   - PON 为 XEPON_10G_1G，SerDes 走 xpon_usxgmii
+ *   - LAN2~LAN4 的 LED 由交换芯片内部 PHY 的 led0 功能驱动
+ *     （原厂 pinctrl 组 gswp1..gswp4-led0-pins 与本文件相同）
+ *
+ * 原厂 HG5580A DTB 里 GPIO 相关节点（与 HG5380A 的差异点，务必上机复核）：
+ *   leds/pwr_led              gpios = <&gpio 30 ...>   // power_gpio=1e
+ *   leds/phy_tx_power_disable gpios = <&gpio 15 ...>   // dsl_gpio=0b? 见下
+ *   leds/an8811_reset         gpios = <&gpio 28 ...>
+ *   gpio-keys-polled/reset_   gpios = <&gpio 0 ...>
+ *   mdio-bus: phy@13(reg 0x0d), phy@14(reg 0x0e), phy@15(reg 0x0f)
+ *
+ * TODO(上机确认)：
+ *   1. 【已实测】2.5G PHY = Motorcomm YT8821，MDIO 地址 0x07，ID 0x4f51ea19。
+ *      U-Boot `mii read` 实测寄存器组：
+ *          0x07: reg0=0x1040 reg1=0x7949 reg2=0x4F51 reg3=0xEA19 reg4=0x11E1
+ *      与 HG5380A 完全一致，可放心套用 kmod-phy-motorcomm。
+ *      注意：地址 0x00 读回同一组值（MDIO 地址低位未完全译码），0x0F 全 0
+ *      （印证原厂 "Could not get PHY ... addr 15"），0x09 是另一颗器件。
+ *      沿用 0x07（与 5380A 参考设计一致），若启动后 PHY 认不到再改 0x00。
+ *   2. reset 键 GPIO —— 【U-Boot 阶段读不到，与 HG5380A 情况相同】
+ *      原厂 DTB 写 GPIO0；本机用 U-Boot `gpio input` 在按键时轮询了
+ *      0/8/16/17/30/33/34/35/36/37/38 共 11 个引脚（955 次采样），
+ *      连按多次均无任何电平变化 —— 说明 U-Boot 没有正确 pinmux 这个按键，
+ *      它的电平在 U-Boot 里是"死"的。
+ *      HG5380A 当年也是同样现象，最后是在 Linux 里数 /proc/interrupts
+ *      的 IRQ 增量才定位到 GPIO35 的。
+ *      因此这里沿用 GPIO35（5380A 实测值），**上机后必须复核**：
+ *        短按复位键，看 /proc/interrupts 里 gpio-keys 的计数是否 +1；
+ *        不增长就把 35 依次换成 0/34/36/37 再试（改本文件后重新编译）。
+ *      注：按键走 OpenWrt 的 gpio-button-hotplug，config 里已关掉内核
+ *      自带的 gpio-keys 驱动。
+ *   3. 光信号(LOS)灯 GPIO（HG5380A 是 GPIO33，本机原厂 DTB 里没有这个节点）
+ *   4. 光宽带灯 PWM 通道（原厂 pwmleds 用 PWM 通道 10、周期 0x3d0900，
+ *      与 HG5380A 相同，但仍需确认 gpio18 是否被 PON 组占用）
+ *   5. factory(UBI 卷 fhdata) 里 MAC/SN 的实际值，未接上之前 MAC 是随机的
+ *   6. bosacal / identity 两个自建分区在 256 MiB flash 尾部空闲区，
+ *      偏移沿用 HG5380A（0xEC00000 / 0xEC20000），本机未写入过，安全
+ */
+/dts-v1/;
+
+/* Firmware/ATF 占用 DRAM 前 2 MiB。 */
+/memreserve/ 0x80000000 0x200000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "an7583.dtsi"
+
+/ {
+	model = "FiberHome HG5580A";
+	compatible = "fiberhome,hg5580a", "airoha,an7583";
+
+	aliases {
+		serial0 = &uart1;
+	};
+
+	chosen {
+		/*
+		 * RootfsB 上的 squashfs。initramfs 镜像会忽略这两个参数
+		 * （内核优先跑 initramfs 里的 /init），所以同一条 DTS 可以同时
+		 * 服务两种镜像。
+		 *
+		 * mtdblock 编号必须按本 DTS 的 partitions 子节点顺序数，不能照抄
+		 * 别的板子。实际顺序是：
+		 *   mtd0 bootloader  mtd1 bootflag   mtd2 KernelA   mtd3 RootfsA
+		 *   mtd4 KernelB     mtd5 RootfsB    mtd6 apps      mtd7 rootfs_data
+		 *   mtd8 frameworka  mtd9 frameworkb mtd10 factory
+		 *   mtd11 bosacal    mtd12 identity
+		 * 原先这里写的是 mtdblock6，那是 apps；改成 mtdblock5 指向 RootfsB。
+		 * 正常启动时 bargsenv 会按 rootfs_partition_name 覆盖本行，
+		 * 但覆盖失效时这个值就会真的被用上，所以必须是正确的。
+		 */
+		bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce root=/dev/mtdblock5 rootfstype=squashfs rootwait fstools_overlay_name=overlay";
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x20000000>;	/* 512 MiB */
+	};
+
+	/*
+	 * 前面板指示灯。电源灯由硬件常亮，不受 GPIO 控制。
+	 * 光信号灯默认用 HG5380A 实测可用的 GPIO33（低有效），
+	 * 本机若实测不对，改这里即可（见文件头 TODO 3）。
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * 2.5G PHY 复位释放 —— 原厂 DTS 的 leds/an8811_reset 节点，
+		 * GPIO28(0x1c)、低有效、default-state="off"。
+		 *
+		 * 名字里的 "an8811" 是原厂沿用的旧称，本机实测 PHY 是
+		 * Motorcomm YT8821（ID 0x4f51ea19 @ MDIO 0x07），引脚位置相同。
+		 *
+		 * 【为什么必须保留】gpio-leds 用 default-state 把这条线驱动出去：
+		 *   低有效 + "off" => 输出被拉高 => 复位释放 => PHY 正常工作。
+		 * 如果这个节点不存在，GPIO28 保持上电默认态，PHY 可能一直停在
+		 * 复位里，表现为 mdio 读不到、2.5G 口不通。
+		 * 所以它不是"指示灯"，是复位控制，删掉会坏。
+		 */
+		/*
+		 * 2.5G PHY 发送使能 —— 原厂 DTS 的 leds/phy_tx_power_disable 节点，
+		 * GPIO15(0x0f)、高有效、default-state="on"。
+		 *
+		 * 【注意这个节点的名字和实际电平是反的】
+		 * 名字叫 disable，但 flags=0x00 是高有效、状态是 "on"，
+		 * 也就是把 GPIO15 驱动为**高**。5380A 与 5580A 的原厂 DTS
+		 * 在这一行完全一致（5380A dtb-3100.dts），说明这是平台级
+		 * 固定接法，不是某一台机器的笔误。
+		 *
+		 * 与 an8811_reset 的区别：
+		 *   an8811_reset         GPIO28 低有效 + "off" => 输出高 => 复位释放
+		 *   phy_tx_power_disable GPIO15 高有效 + "on"  => 输出高
+		 * 两条线最终都是高电平，但一个走低有效+off、一个走高有效+on，
+		 * 语义不同，不能合并，也不能靠"反正都是高"就删掉其中一个：
+		 * 删掉 phy_tx_power_disable 会让 GPIO15 停在上电默认态，
+		 * 2.5G PHY 的发送通路可能不使能，表现为链路起不来但 mdio 可读。
+		 *
+		 * 保留原厂名字（含 disable 字样），便于和厂商 DTS 逐行对照。
+		 */
+
+
+		an8811_reset {
+			label = "an8811_reset";
+			gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		/*
+		 * 电源灯：原厂 DTS 用 GPIO30(0x1e)、低有效、default-state="on"。
+		 * 实测电源灯常亮，即使不驱动也亮（硬件上拉），所以不是必需项，
+		 * 但按原厂写出来更接近真实硬件行为。
+		 */
+		pwr_led {
+			label = "power";
+			function = LED_FUNCTION_POWER;
+			gpios = <&an7583_pinctrl 30 GPIO_ACTIVE_LOW>;
+			default-state = "on";
+		};
+
+		led_los: los {
+			label = "green:los";
+			function = LED_FUNCTION_WAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&an7583_pinctrl 33 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "pon0-los";
+		};
+	};
+
+		/*
+	 * reset 键：**GPIO35**，低有效。
+	 *
+	 * 这里有一个容易踩的坑，值得写清楚：
+	 * 从 CRC 全验证的 KernelA 分区重新导出的厂商 DTB 里，
+	 * reset_ 节点写的是 gpios = <&pinctrl 0x00 0x01>，即 GPIO0；
+	 * HG5380A 的厂商 DTB 也是同样的 GPIO0。
+	 * 但 HG5380A 是**本仓库里已验证能工作**的机型，它的板级 DTS
+	 * 用的是 GPIO35 —— 那个值不是抄的厂商 blob，是上机实测出来的。
+	 *
+	 * 结论：在这颗芯片的原厂 DTB 里，"0" 并不等于物理 GPIO0。
+	 * 为了"跟厂商一致"改成 0，会破坏一个已验证可用的按键，
+	 * 而且 GPIO0 在 U-Boot 阶段本身就读到过的是固定电平。
+	 * 所以保持 GPIO35。
+	 *
+	 * TODO(上机确认)：5580A 首次启动后，按住复位键看
+	 *   /proc/interrupts 或 evtest 是否报 KEY_RESTART；
+	 * 若确实不是 35，再按实测值改。
+	 */
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&an7583_pinctrl 35 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+};
+
+&an7583_pinctrl {
+	gpio-ranges = <&an7583_pinctrl 0 2 53>;
+
+	pon_pins: pon-pins {
+		mux {
+			function = "pon";
+			groups = "pon_tx_disable_gpio";
+		};
+	};
+
+	mdio0_pins: mdio0-pins {
+		mux {
+			function = "mdio";
+			groups = "mdio";
+		};
+		conf {
+			pins = "mdio_0";
+			output-high;
+		};
+	};
+
+	i2c0_pins: i2c0-pins {
+		mux {
+			function = "i2c";
+			groups = "i2c0";
+		};
+	};
+
+	i2c1_pins: i2c1-pins {
+		mux {
+			function = "i2c";
+			groups = "i2c1";
+		};
+	};
+
+	spi_pins: spi-pins {
+		mux {
+			function = "spi";
+			groups = "spi";
+		};
+	};
+
+	pwm_gpio18_pins: pwm-gpio18-pins {
+		mux {
+			function = "pwm";
+			pins = "gpio18";
+			output-enable;
+		};
+	};
+};
+
+&snfi {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_pins>;
+};
+
+&spi_nand {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x280000>;
+			read-only;
+		};
+
+		partition@280000 {
+			label = "bootflag";
+			reg = <0x280000 0x80000>;
+		};
+
+		partition@300000 {
+			label = "KernelA";
+			reg = <0x300000 0x600000>;
+		};
+
+		partition@900000 {
+			label = "RootfsA";
+			reg = <0x900000 0x2800000>;
+		};
+
+		partition@3100000 {
+			label = "KernelB";
+			reg = <0x3100000 0x600000>;
+		};
+
+		/*
+		 * linux,rootfs 让内核把本分区设为默认根设备。
+		 *
+		 * 没有它时，drivers/mtd/mtdcore.c 只在分区名恰好是 "rootfs"
+		 * 且开了 CONFIG_MTD_ROOTFS_ROOT_DEV 时才设 ROOT_DEV：
+		 *
+		 *   if (of_property_read_bool(of_node, "linux,rootfs") ||
+		 *       (MTD_ROOTFS_ROOT_DEV && !strcmp(mtd->name, "rootfs") && ROOT_DEV == 0))
+		 *
+		 * 本机分区名是 "RootfsB"，不匹配那条字符串比较；
+		 * 于是内核拿不到根设备，退回按 rootfstype 探测，
+		 * 在 squashfs 分区上试 jffs2，报
+		 *   "Cowardly refusing to erase blocks on filesystem with no valid JFFS2 nodes"。
+		 *
+		 * 加这个属性后，bootargs 里的 root= 可以省略。
+		 */
+		partition@3700000 {
+			label = "RootfsB";
+			reg = <0x3700000 0x2800000>;
+			linux,rootfs;
+		};
+
+		/*
+		 * 厂商在这里只声明了一个 apps 分区：
+		 *
+		 *   设备 mtd list: apps 0x5F00000 .. 0xC700000   104 MiB
+		 *
+		 * 我们把它切成两段，两段合起来正好等于厂商那一个分区
+		 * （起点 0x5F00000、终点 0xC700000 都吻合，合计 0x6800000）：
+		 *
+		 *   apps        0x5F00000 +0x2000000   32 MiB，留给厂商应用区
+		 *   rootfs_data 0x7F00000 +0x4800000   72 MiB，OpenWrt 的 overlay
+		 *
+		 * 切法本身是安全的，但要知道第二段里原本不是空的：实测它的开头
+		 * 就是 UBI EC 头（"UBI#"），72 MiB 全部非空，是厂商在那 104 MiB
+		 * 里放的 UBI 数据卷。已完整备份到 backup/rootfs_data.bin，并按
+		 * 每块设备的 CRC32 逐个偏移验证过（288 个偏移全部吻合）。
+		 *
+		 * 但这段**不能**再叫 rootfs_data。实测本机的 mtd6
+		 * （squashfs-split 从 RootfsB 尾部自动切出来的那段）
+		 * 有一个 ECC 不可纠正的擦除块：
+		 *
+		 *   jffs2: cannot read OOB for EB at 020e0000,
+		 *          requested 8 bytes, read 8 bytes, error -74
+		 *   mount_root: failed to mount -t jffs2 /dev/mtdblock6
+		 *               /tmp/overlay: I/O error
+		 *
+		 * -74 是 EBADMSG。单独读第 263 块（offset 0x020e0000）
+		 * 会让 ecc_failures 递增，读邻居 262/264 则不变，
+		 * 而 bad_blocks 仍是 0 —— 属于「ECC 坏但未标记坏块」。
+		 * jffs2 不会跳过坏块，所以那段分区根本挂不上，
+		 * 结果 overlay 退回 tmpfs，主机名和密码全部丢失。
+		 *
+		 * 改成 overlay 这个名字，启动参数里配
+		 *   fstools_overlay_name=overlay
+		 * 让 fstools 用这一段（mtd8）做 overlay。
+		 * 挂载点见 fstools/libfstools/mount_root.c：
+		 *   dataname = "rootfs_data";
+		 *   if (get_var_from_file("/proc/cmdline", "fstools_overlay_name", ...))
+		 *
+		 * 代价是首次启动会格式化这一段，覆盖厂商那 72 MiB UBI 卷；
+		 * 内容已完整备份到 backup/rootfs_data.bin（75,497,472 B，
+		 * 每擦除块的 CRC32 都验证过），需要时可以写回。
+		 */
+		partition@5f00000 {
+			label = "apps";
+			reg = <0x5f00000 0x2000000>;
+		};
+
+		/*
+		 * overlay 只取 24 MiB，不是厂商那段的完整 72 MiB。
+		 *
+		 * 原因：这块 NAND 在这一段的后半部分有多个 ECC 不可纠正的
+		 * 坏块。实测两次格式化分别撞到分区内偏移 0x04700000 和
+		 * 0x047c0000（物理 0xC600000 / 0xC6C0000），报
+		 *   jffs2: cannot read OOB for EB at 047c0000, error -74
+		 *   mount_root: failed to mount -t jffs2 /dev/mtdblock8
+		 * 结果 overlay 挂不上，系统退回 tmpfs，主机名变 (none)，
+		 * 所有配置不持久。
+		 *
+		 * JFFS2 在格式化时要写擦除计数器，只要扫到坏块就整块失败。
+		 * 把分区限制在坏块之前（0x7f00000 + 0x1800000 = 0x9700000，
+		 * 远早于 0xC600000）就能稳定工作。
+		 *
+		 * 24 MiB 对这台机器足够：实测运行时 overlay 只用了 2.4 MB。
+		 * 剩下的 0x9700000..0xc700000 留给 apps 之外的用处。
+		 */
+		partition@7f00000 {
+			label = "overlay";
+			reg = <0x7f00000 0x1800000>;
+		};
+
+		partition@9700000 {
+			label = "apps_data";
+			reg = <0x9700000 0x3000000>;
+		};
+
+		partition@c700000 {
+			label = "frameworka";
+			reg = <0xc700000 0x1000000>;
+		};
+
+		partition@d700000 {
+			label = "frameworkb";
+			reg = <0xd700000 0x1000000>;
+		};
+
+		/*
+		 * 原厂 factory 是 UBI 容器：40 个 PEB，容量表里只有一个用户卷
+		 * "fhdata"（32 PEB = 4 MiB），里面是 UBIFS，共 11 个文件。
+		 *
+		 * 已在本机解出并确认的关键内容：
+		 *   table          2048 字节  BOSA 校准表（FiberHome BDBOB 容器）
+		 *   factory_conf   ManufacturerOUI / SerialNumber / UserPasswd / SSID
+		 *   sysinfo_conf   area_code / operators_code / 版本号
+		 *   led_gpio_conf  灯位映射
+		 *
+		 * 注意这个 UBI 用的是旧版卷表布局：vol_type=u8、upd_marker=u8、
+		 * name_len=be16，name 从记录 +16 开始，记录长 172 字节；卷表记录
+		 * 的校验和是 ~crc32(rec[:168])（不做最终取反）。按新版布局解析
+		 * 会得到乱码。
+		 *
+		 * 保持 read-only：这是整机唯一一份身份数据。
+		 */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+			compatible = "linux,ubi";
+
+			volumes {
+				ubi_fhdata: ubi-volume-fhdata {
+					volname = "fhdata";
+				};
+			};
+		};
+
+		/*
+		 * BOSA 校准表（FiberHome BDBOB 容器，2048 字节）。
+		 *
+		 * 本机实测该分区原本整块是 0xFF —— 厂商从没往这里拷过东西，
+		 * 而内核从这个 nvmem cell 读校准，不填就会读到 0xFF。
+		 * 内容已从 factory/fhdata 的 table 文件取出并写入本分区，
+		 * 写入后回读 crc32 = f1315e00，与 table 完全一致。
+		 *
+		 * table 里记录的模块型号是 ux3363。
+		 */
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x20000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			bosa_calibration: calibration@0 {
+				reg = <0x0 0x800>;
+			};
+		};
+
+		/*
+		 * 出厂身份数据。本机实测该分区同样是整块 0xFF（空的）。
+		 *
+		 * 偏移与长度沿用 HG5380A 的布局：
+		 *   +0x00 base MAC     +0x06 LAN/2.5G MAC
+		 *   +0x0C PON SN(8 字节，"FHTT"+4 字节)
+		 *   +0x14 PON MAC
+		 *
+		 * 但本机对应的取值来源是 factory/fhdata 里的 factory_conf：
+		 *   ManufacturerOUI = 24E3A4   （与实测 MAC 24-E3-A4-xx 一致）
+		 *   SerialNumber    = 3B83524E3A4B2DDDC
+		 * 这串序列号的格式与 HG5380A 的 "FHTT"+4 字节并不相同，
+		 * 映射关系还没确定，所以不能直接照抄 5380A 的写入逻辑。
+		 * 在此之前，identity 保持为空，MAC 由 base-files 另行处理。
+		 */
+		partition@ec20000 {
+			label = "identity";
+			reg = <0xec20000 0x20000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			fh_base_mac: mac-address@0 {
+				reg = <0x0 0x6>;
+			};
+
+			fh_lan_mac: mac-address@6 {
+				reg = <0x6 0x6>;
+			};
+
+			fh_pon_serial: pon-serial@c {
+				reg = <0xc 0x8>;
+			};
+
+			fh_pon_mac: mac-address@14 {
+				reg = <0x14 0x6>;
+			};
+		};
+	};
+};
+
+&i2c0 {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins>;
+
+	/*
+	 * 光模块：原厂 fhdrv_bosa_driver_init.sh 的判断表
+	 *   0x28 -> gn28l95   0x98 -> gn28l98
+	 *   0x2e -> ux3361    0x96 -> gn25l96
+	 *   0x20 -> ux3320    0x02 -> ux3322
+	 * 地址 0x51、分页 0x7f、chip id 读 0xA4。
+	 *
+	 * 【型号存疑，待上机确认】两处证据互相矛盾：
+	 *   - 口头说法：本机光模块是 3361（UX3361），对应 chip id 0x2e
+	 *   - 设备自己的记录：factory/fhdata 里的 table 文件写的是 ux3363
+	 * 后者是厂商在出厂时写进 flash 的型号字符串，通常比口头描述可靠。
+	 * 但 U-Boot 没有 i2c 命令（94 条命令里没有），当前无法读 0xA4 验证，
+	 * 只能等 PonWRT 起来后实测。驱动按 paged-bosa 通用方式工作，
+	 * 型号差异主要影响校准系数的解释，不影响能否驱动。
+	 */
+	hg5580a_bosa: optical-front-end@51 {
+		compatible = "fiberhome,hg5x-bosa", "airoha,paged-bosa";
+		reg = <0x51>;
+
+		/* 原厂 phy_tx_power_disable = GPIO15，默认拉高（关发射） */
+		fiberhome,ben-active-high;
+		tx-disable-gpios = <&an7583_pinctrl 15 GPIO_ACTIVE_HIGH>;
+
+		nvmem-cells = <&bosa_calibration>;
+		nvmem-cell-names = "calibration";
+		status = "okay";
+	};
+};
+
+&i2c1 {
+	status = "disabled";
+};
+
+&usb_phy {
+	status = "okay";
+};
+
+&usb0 {
+	status = "okay";
+};
+
+&mdio_0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio0_pins>;
+
+	/*
+	 * 2.5G PHY —— 已实测确认。
+	 *
+	 * U-Boot `mii read` 扫全总线结果（2026-11-05）：
+	 *   0x07: reg0=0x1040 reg1=0x7949 reg2=0x4F51 reg3=0xEA19 reg4=0x11E1
+	 *   => PHY ID 0x4f51ea19 = Motorcomm YT8821（2.5G），与 HG5380A 同款
+	 *   0x00 读回同一组值（地址低位未完全译码，属于总线别名）
+	 *   0x0F 全 0x0000（印证原厂 "Could not get PHY ... addr 15"）
+	 *   0x09 是另一颗器件（reg3=0x0420 reg4=0x0DE1），不是 2.5G PHY
+	 *
+	 * 沿用 0x07（与 5380A 参考设计一致）。若启动后 PHY 认不到，改 0x00 即可。
+	 * 用 "ethernet-phy-ieee802.3-c22" 让内核自己读 ID，读到 0x4f51ea19
+	 * 就会绑上 motorcomm 驱动（DEVICE_PACKAGES 里已带 kmod-phy-motorcomm）。
+	 */
+	yt8821: ethernet-phy@7 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0x7>;
+	};
+};
+
+&switch {
+	status = "okay";
+	/*
+	 * 不要在这里写 pinctrl-0 = <&mdio0_pins>：该 pin group 已归 mdio_0，
+	 * 同一组被两个设备申请时第二个会 -EINVAL，switch 探测失败。
+	 */
+};
+
+&gsw_port2 {
+	status = "okay";
+	label = "lan2";
+};
+
+&gsw_phy2 {
+	status = "okay";
+	interrupts = <2>;
+};
+
+&gsw_port3 {
+	status = "okay";
+	label = "lan3";
+};
+
+&gsw_phy3 {
+	status = "okay";
+	interrupts = <3>;
+};
+
+&gsw_port4 {
+	status = "okay";
+	label = "lan4";
+};
+
+&gsw_phy4 {
+	status = "okay";
+	interrupts = <4>;
+};
+
+&gdm3 {
+	status = "okay";
+	openwrt,netdev-name = "lan1";
+	phy-handle = <&yt8821>;
+	phy-mode = "2500base-x";
+
+	nvmem-cells = <&fh_lan_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * gdm1 是 GSW 交换机的 CPU 口（switch 的 port@6 用 ethernet = <&gdm1>）。
+ * 不启用它，DSA 在 dsa_register_switch() 里会因为 conduit 永远不存在而
+ * 永久 -EPROBE_DEFER，lan2~lan4 与 switch 的内部 mdio 总线都不会出现。
+ */
+&gdm1 {
+	status = "okay";
+
+	nvmem-cells = <&fh_base_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+&eth {
+	status = "okay";
+};
+
+/*
+ * AN7583 NPU（硬件转发加速）—— 关闭。
+ * HG5380A 上机实测：status = "okay" 时内核停在
+ *   airoha-npu 1e900000.npu: NOTICE:  Get secure key in flash
+ * 之后看门狗复位。等 LAN/PON 都验证完再单独调。
+ */
+&npu {
+	status = "disabled";
+};
+
+&pon_pcs {
+	status = "okay";
+};
+
+&eth_pcs {
+	status = "okay";
+};
+
+&xpon_mac {
+	/*
+	 * PON 引脚复用必须保留：pon_tx_disable_gpio 组把 15/16/18/19/20
+	 * 复用成 PON 功能。撤掉后收侧浮空，会把噪声误判成光信号。
+	 * 代价：该组含 gpio18，"光宽带"灯 PWM 暂时用不了。
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pon_pins>;
+
+	optical-front-end = <&hg5580a_bosa>;
+	data-path = <&gdm2>;
+
+	nvmem-cells = <&fh_pon_serial>;
+	nvmem-cell-names = "pon-serial";
+	status = "okay";
+};
+
+&gdm2 {
+	airoha,pon-data-path;
+	status = "okay";
+
+	nvmem-cells = <&fh_pon_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * an7583.dtsi 给 CPU 挂了 operating-points-v2（含 required-opps + genpd），
+ * 6.18 的 dt_cpufreq 解析时会踩野指针 panic。摘掉 OPP 引用。
+ */
+&cpu0 {
+	/delete-property/ operating-points-v2;
+};
+
+&cpu1 {
+	/delete-property/ operating-points-v2;
+};
+
+&cpufreq {
+	/delete-property/ operating-points-v2;
+	status = "disabled";
+};
+
+/*
+ * PWM 控制器是 system-controller@1fbf0200（syscon）的子节点：
+ * 驱动用 device_node_to_regmap(dev->parent) 拿寄存器，不能写在顶层，
+ * 也不能带 reg（带了会 probe 失败 -12）。
+ */
+&{/soc/system-controller@1fbf0200} {
+	pwm: pwm {
+		compatible = "airoha,en7581-pwm";
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+};
+
+/ {
+	pwmleds {
+		compatible = "pwm-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pwm_gpio18_pins>;
+		/* gpio18 已被 PON 引脚组占用，等 pinctrl 补丁后再启用 */
+		status = "disabled";
+
+		led_pon: pon {
+			label = "green:pon";
+			function = LED_FUNCTION_WAN;
+			color = <LED_COLOR_ID_GREEN>;
+			pwms = <&pwm 10 4000000 1>;
+			max-brightness = <255>;
+			linux,default-trigger = "pon0-registration";
+		};
+	};
+};

@@ -1,0 +1,48 @@
+# 追加到 ponwrt 的 target/linux/airoha/image/an7583.mk 末尾
+#
+# 注意：这里不声明 ARTIFACT/preloader.bin 与 ARTIFACT/bl31-uboot.fip。
+# 本仓库 tools/ 里没有 fiptool，直接声明会让 install 阶段报
+# “staging_dir/host/bin/fiptool: No such file or directory”（Error 127）。
+#
+# 另外：DEVICE_DTS 指向的 an7583-fiberhome-hg5580a.dts 必须位于
+#   target/linux/airoha/dts/
+# （image/Makefile 里 DEVICE_DTS_DIR := ../dts）。board/ 下的那份是源，
+# 构建前要 cp 过去，见 build-hg5580a.yml。
+
+define Device/fiberhome_hg5580a
+	# 原厂 U-Boot 2023.04 的 LZMA 解码器解不了 OpenWrt 产出的 lp=2 数据流
+	# （uncompress error 7），改用 gzip，兼容性最好。
+	KERNEL_SUFFIX := -uImage.itb
+	KERNEL = kernel-bin | gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
+	KERNEL_NAME := Image
+	DEVICE_VENDOR := FiberHome
+	DEVICE_MODEL := HG5580A
+	DEVICE_DTS := an7583-fiberhome-hg5580a
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	KERNEL_SIZE := 6144k
+	# 本机光模块是 UX3363（bosacal 分区里的 table 明确写着 ux3363），
+	# 只有 kmod-airoha-paged-bosa 里的 airoha-paged-bosa-ux3363.c 能驱动它。
+	#
+	# 上游 openwrt-pon-drivers 的 airoha-pon-frontends/Makefile 里，
+	# airoha-pon-frontend 与 airoha-en7572 的 DEPENDS 都写着
+	#   @(TARGET_airoha_an7581||TARGET_airoha_an7583)
+	# 唯独 airoha-paged-bosa 只写 @TARGET_airoha_an7581，于是 AN7583 下
+	# 这个包不可见、选不中、不进镜像，DTS 里的 BOSA 节点无人绑定，
+	# airoha-xpon 在 airoha_pon_frontend_get() 处拿不到 provider，
+	# probe 直接失败，pon0 根本不出现。
+	# 由 board/airoha-paged-bosa-an7583.patch 在 feeds update 之后修正。
+	#
+	# en7572 保留：若某台机器换装 EN7572 前端，两个驱动并存不冲突，
+	# 各自按 compatible 匹配。
+	#
+	# 本机 2.5G PHY 是 Motorcomm YT8821（MDIO 0x07，ID 0x4f51ea19），
+	# DTS 里用 ethernet-phy-ieee802.3-c22 通用绑定，带 motorcomm 驱动更稳。
+	DEVICE_PACKAGES := kmod-phy-motorcomm \
+		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
+		airoha-ponctl airoha-pond
+	IMAGES := sysupgrade.bin
+	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
+		pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += fiberhome_hg5580a

@@ -6,6 +6,7 @@ on:
   push:
     branches:
       - master
+      - Ponwrt-5380A
   workflow_dispatch:
     inputs:
       profile:
@@ -15,6 +16,15 @@ on:
           - minimal
           - full
         default: minimal
+
+# 同一分支只保留最新一次构建。
+# 一次全量编译要 60~120 分钟，之前连续推送几次修复，导致 4 个构建并行跑，
+# 每个都在验证几乎同一件事，白烧 runner 时间。
+# 加了 cancel-in-progress 后，新推送会自动取消同分支的旧构建。
+# 注意：只对同 ref 生效，main/Ponwrt-5380A 之间互不影响。
+concurrency:
+  group: hg5380a-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -42,42 +52,139 @@ jobs:
         run: |
           test -f board/an7583-fiberhome-hg5380a.dts
           cp board/an7583-fiberhome-hg5380a.dts target/linux/airoha/dts/
-          if ! grep -q fiberhome_hg5380a target/linux/airoha/image/an7583.mk; then
-            cat board/an7583.mk.snippet >> target/linux/airoha/image/an7583.mk
-          fi
-          grep -n "fiberhome_hg5380a" target/linux/airoha/image/an7583.mk | head
 
-      - name: Trim feeds (minimal)
+          # 仓库自带的 an7583.mk 里已经有一份 Device/fiberhome_hg5380a，
+          # 但它的 DEVICE_PACKAGES 是从 AN7581 抄来的，含 kmod-airoha-paged-bosa。
+          # 该包在 openwrt-pon-drivers 里的声明是：
+          #     DEPENDS:=@TARGET_airoha_an7581 +kmod-airoha-pon-frontend
+          # 即只对 AN7581 可见，AN7583 下根本不存在这个符号。结果镜像打包时报：
+          #     ERROR: unable to select packages:
+          #       kmod-airoha-paged-bosa (no such package)
+          # AN7583 用的是 EN7572 前端，正确的 DEVICE_PACKAGES 在 snippet 里。
+          #
+          # 原来的写法是 `if ! grep -q fiberhome_hg5380a ...; then 追加`，
+          # 因为旧定义已经存在，grep 命中，snippet 永远不会被追加。
+          # 改为：先精确删掉旧块（含 TARGET_DEVICES 行，避免重复注册），再追加。
+          python3 - <<'PY'
+          import re, pathlib, sys
+          p = pathlib.Path('target/linux/airoha/image/an7583.mk')
+          s = p.read_text()
+          pat = re.compile(
+              r'define Device/fiberhome_hg5380a\n(?:.*?\n)*?endef\n'
+              r'TARGET_DEVICES \+= fiberhome_hg5380a\n'
+          )
+          new, n = pat.subn('', s, count=1)
+          if n != 1:
+              sys.exit('ERROR: 未找到旧的 Device/fiberhome_hg5380a 定义，'
+                       '请检查 an7583.mk 结构是否变化')
+          p.write_text(new)
+          print('removed old Device/fiberhome_hg5380a block')
+          PY
+
+          cat board/an7583.mk.snippet >> target/linux/airoha/image/an7583.mk
+
+          echo "--- 应用后的 device 定义 ---"
+          sed -n '/define Device\/fiberhome_hg5380a/,/^TARGET_DEVICES += fiberhome_hg5380a/p' \
+            target/linux/airoha/image/an7583.mk
+          # kmod-airoha-paged-bosa 必须出现：本机光模块是 UX3363，
+          # 只有这个包里的 airoha-paged-bosa-ux3363.c 能驱动它。
+          # 上游 feed 给这个包的 DEPENDS 只写了 @TARGET_airoha_an7581，
+          # AN7583 下选不中；由下面的 "Patch pon-drivers for AN7583" 步骤修正。
+          #
+          # sed 先把注释剥掉再 grep，避免命中说明性注释。
+          if ! sed 's/#.*//' target/linux/airoha/image/an7583.mk | grep -q 'paged-bosa'; then
+            echo "::error::an7583.mk 缺少 kmod-airoha-paged-bosa，UX3363 光模块将无驱动可用"
+            exit 1
+          fi
+
+      - name: Trim feeds
         env:
           PROFILE: ${{ inputs.profile || 'minimal' }}
         run: |
-          # openwrt/video 里的 qt5 有 Kconfig 递归依赖，最小版不需要它
-          if [ "$PROFILE" = "minimal" ]; then
-            sed -i '/^src-git video /d' feeds.conf.default
-          fi
+          # 两个档位都删掉对 HG5380A 完全无用的 feed。
+          #
+          # 已核实：minimal 档选中 16 个包、full 档 138 个包，
+          # 其中没有任何一个来自 video 或 telephony —— 这台设备是纯
+          # 路由/PON 网关，既不播视频也不用 Asterisk。
+          #
+          # video    : 含 qt5，有已知的 Kconfig 递归依赖（原注释记的就是这个）
+          # telephony: 含 asterisk/freeswitch 等，体量大且用不到
+          #
+          # 删掉后能减少克隆体积，也让 make defconfig 少解析大量无关 Kconfig。
+          sed -i '/^src-git video /d; /^src-git telephony /d' feeds.conf.default
+          echo "profile = $PROFILE"
           cat feeds.conf.default
 
+      - name: Fix exec bits
+        run: |
+          # 从 Windows 工作区导入时 NTFS 会丢失 Unix 可执行位，
+          # 这里统一补一遍，避免 scripts/feeds、config/check-*.sh 等报 Permission denied
+          chmod +x scripts/* config/* 2>/dev/null || true
+          find . -maxdepth 3 -name '*.sh' -not -path './build_dir/*' -not -path './staging_dir/*' -exec chmod +x {} + 2>/dev/null || true
+          echo "--- 抽查 ---"
+          ls -l scripts/feeds config/check-uname.sh 2>/dev/null || true
       - name: Update feeds
         run: ./scripts/feeds update -a
 
+      - name: Patch pon-drivers for AN7583
+        run: |
+          # 上游 openwrt-pon-drivers 的 airoha-pon-frontends/Makefile 里，
+          # airoha-pon-frontend 和 airoha-en7572 的 DEPENDS 都是
+          #   @(TARGET_airoha_an7581||TARGET_airoha_an7583)
+          # 唯独 airoha-paged-bosa 只写了 @TARGET_airoha_an7581。
+          # 后果：AN7583 设备在 Kconfig 里看不到这个包 → 选不中 → 不进镜像
+          # → DTS 里的 BOSA 节点无人绑定 → airoha_pon_frontend_get()
+          # 拿不到 provider → airoha-xpon probe 失败 → pon0 不出现。
+          #
+          # 光模块是 UX3363，该驱动就在 airoha-paged-bosa.ko 里。
+          f=feeds/pon_drivers/airoha-pon-frontends/Makefile
+          test -f "$f" || { echo "::error::$f 不存在，feed 结构变了"; exit 1; }
+          echo "--- 打补丁前 ---"
+          grep -n 'DEPENDS' "$f"
+          patch -p1 -d feeds/pon_drivers < board/airoha-paged-bosa-an7583.patch
+          echo "--- 打补丁后 ---"
+          grep -n 'DEPENDS' "$f"
+          n=$(grep -c 'TARGET_airoha_an7583' "$f")
+          if [ "$n" != "3" ]; then
+            echo "::error::期望 3 个包都支持 AN7583，实际 $n 个"
+            exit 1
+          fi
+          echo "OK: 三个 PON 前端包都支持 AN7583"
+
       - name: Provide libffi
         run: |
-          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败。
-          # 仓库里已自带一份（package/libs/libffi，3.8.0 + 22 个 patches），
-          # 优先用它，只有缺失时才回退到从 openwrt 主树取，避免联网覆盖掉自带版本。
-          if [ -f package/libs/libffi/Makefile ]; then
-            echo "OK: 使用仓库自带的 package/libs/libffi"
-            grep -E '^PKG_(VERSION|HASH)' package/libs/libffi/Makefile || true
-          else
-            echo "WARN: 仓库未自带 libffi，回退到 openwrt 主树"
-            git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
-            git -C /tmp/owrt sparse-checkout set package/libs/libffi
-            mkdir -p package/libs
-            cp -a /tmp/owrt/package/libs/libffi package/libs/
-          fi
+          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
+          git -C /tmp/owrt sparse-checkout set package/libs/libffi
+          mkdir -p package/libs
+          cp -a /tmp/owrt/package/libs/libffi package/libs/
 
       - name: Install feeds
         run: ./scripts/feeds install -a
+
+      - name: Drop packages with Kconfig recursion
+        # 这两组包在 feeds 的 Kconfig 里互相 select，触发 kconfig 的
+        # "recursive dependency detected!"：
+        #
+        #   PACKAGE_fwknopd 被 PACKAGE_luci-app-fwknopd select
+        #   PACKAGE_luci-app-fwknopd depends on FWKNOPD_GPG
+        #   FWKNOPD_GPG depends on PACKAGE_fwknopd
+        #
+        #   PACKAGE_squeezelite-custom depends on SQUEEZELITE_WMA_ALAC
+        #   SQUEEZELITE_WMA_ALAC depends on PACKAGE_squeezelite-custom
+        #
+        # 这不会中止 make defconfig，但 kconfig 明确提示递归时生成的 .config
+        # 可能不正确。两个档位都用不到这两个包，直接移除包目录从源头消除。
+        run: |
+          for d in feeds/packages/net/fwknop \
+                   feeds/packages/sound/squeezelite \
+                   feeds/luci/applications/luci-app-fwknopd; do
+            if [ -e "$d" ]; then rm -rf "$d"; echo "removed $d"
+            else echo "absent  $d"; fi
+          done
+          rm -rf package/feeds/packages/fwknop \
+                 package/feeds/packages/squeezelite \
+                 package/feeds/luci/luci-app-fwknopd 2>/dev/null || true
 
       - name: Configure
         env:
@@ -88,8 +195,8 @@ jobs:
             cp configs/an7583.config .config
             sed -i '/^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_/d' .config
             echo 'CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5380a=y' >> .config
-            if [ -f configs/an7581-tyfza1-packages.config ]; then
-              grep '^CONFIG_PACKAGE_' configs/an7581-tyfza1-packages.config >> .config || true
+            if [ -f configs/hg5380a-packages.config ]; then
+              grep '^CONFIG_PACKAGE_' configs/hg5380a-packages.config >> .config || true
             fi
           else
             # 最小验证版：用已知可用的 an7583.config 打底（保留 target/内核元数据），
@@ -108,15 +215,14 @@ jobs:
           CONFIG_PACKAGE_luci-theme-bootstrap=y
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-pon=y
-          # 上面 grep -v 把 an7583.config 里所有 =y 的包都清掉了，
-          # 连 uhttpd 也一起没了。luci-base 的 DEPENDS 里并不含 uhttpd，
-          # 携带 +uhttpd +uhttpd-mod-ubus 的是元包 luci-light。
-          # 只选 luci-mod-* 的结果就是：LuCI 文件全在、80 端口不监听、
-          # /etc/init.d/uhttpd 不存在，网页打不开。
-          # 因此必须选 luci-light，并显式再选一次 uhttpd 做双保险。
+          # luci-base 只带 rpcd/ucode/cgi-io/liblucihttp，不含 Web 服务器。
+          # 上面第 205 行的 grep -v 又把 an7583.config 里的 uhttpd=y 清掉了，
+          # 结果就是镜像里 LuCI 文件齐全、80 端口却不监听、网页打不开
+          # （实机 r0-e1921dc 上确认：/etc/init.d/uhttpd 不存在）。
+          # luci-light 的依赖里有 +uhttpd +uhttpd-mod-ubus，由它带进来。
+          # 注意不要只手写 CONFIG_PACKAGE_uhttpd=y —— 那样 uhttpd-mod-ubus
+          # 不会跟着来，LuCI 的 ubus RPC 仍然不通。
           CONFIG_PACKAGE_luci-light=y
-          CONFIG_PACKAGE_uhttpd=y
-          CONFIG_PACKAGE_uhttpd-mod-ubus=y
           CONFIG_PACKAGE_airoha-en8811h-firmware=y
           CONFIG_PACKAGE_dropbear=y
           CONFIG_PACKAGE_htop=y
@@ -183,6 +289,23 @@ jobs:
       - name: List artifacts
         if: always()
         run: find bin/targets/airoha/an7583 -maxdepth 1 -type f -printf '%f  %s\n' 2>/dev/null || true
+
+      - name: Verify firmware was produced
+        # Upload firmware 用的是 if-no-files-found: warn，而 path 里包含
+        # config.buildinfo（每次都会生成），所以这个告警永远不会触发。
+        # 结果是「编译失败、一个固件都没有」也可能表现为构建成功。
+        # 这里显式要求至少存在一个 sysupgrade 镜像，否则让构建失败。
+        run: |
+          IMG=bin/targets/airoha/an7583
+          echo "--- $IMG 下的文件 ---"
+          ls -l "$IMG" 2>/dev/null || true
+          N=$(find "$IMG" -maxdepth 1 -type f -name '*sysupgrade*' 2>/dev/null | wc -l)
+          echo "sysupgrade 镜像数量: $N"
+          if [ "$N" -eq 0 ]; then
+            echo "::error::没有生成任何 sysupgrade 镜像，构建虽然返回 0 但产物缺失"
+            exit 1
+          fi
+          find "$IMG" -maxdepth 1 -type f -name '*sysupgrade*' -printf '  %f  %s 字节\n'
 
       - name: Upload firmware
         uses: actions/upload-artifact@v4

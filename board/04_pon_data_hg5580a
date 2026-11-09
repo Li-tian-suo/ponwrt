@@ -1,0 +1,31 @@
+#!/bin/sh
+# HG5580A：给板级数据工具补上 pon_data 目标（校准表读写用）
+#
+# 用 /proc/mtd 判断而不是 board_name：上游 03_pon_data 里没有 hg5580a，
+# 而且 board_name 在 board.d 的执行环境里不一定可用。
+# 本板有独立的 bosacal 与 identity 分区，各 128 KiB。
+
+. /lib/functions/uci-defaults.sh
+
+grep -q '"bosacal"' /proc/mtd 2>/dev/null || exit 0
+grep -q '"identity"' /proc/mtd 2>/dev/null || exit 0
+
+board_config_update
+
+json_select pon_data 2>/dev/null || json_add_object pon_data
+
+json_add_object bosacal
+json_add_string type mtd
+json_add_int size 131072
+json_close_object
+
+json_add_object identity
+json_add_string type mtd
+json_add_int size 131072
+json_close_object
+
+json_close_object
+
+board_config_flush
+
+exit 0

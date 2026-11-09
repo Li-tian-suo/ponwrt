@@ -1,0 +1,88 @@
+#!/bin/sh /etc/rc.common
+#
+# Attach the "overlay" MTD partition as a UBI device and make sure it carries a
+# volume named "overlay".
+#
+# Why this exists in addition to 79_hg5580a_preinit_tmpfs
+# --------------------------------------------------------
+# The preinit hook tries to do this before mount_root runs, so that fstools can
+# mount the overlay immediately and pivot the root in one step.  That is the
+# preferred path, but preinit runs before /dev is populated on this board, so
+# ubiattach can fail there.  This init script is the fallback: it runs from
+# /etc/init.d with a fully populated /dev and makes the UBI device available.
+#
+# On its own it cannot repair a boot that already fell back to a tmpfs overlay,
+# but it does make the next reboot's preinit path reliable, because the UBI
+# volume created here persists in flash.
+#
+# The reason UBIFS rather than JFFS2 is documented in
+# docs/hg5580a-overlay-postmortem.md: JFFS2 aborts on the first eraseblock whose
+# OOB it cannot read (error -74 / EBADMSG), while UBI reports 192 good PEBs and
+# 0 bad PEBs on the very same partition.
+
+START=15
+
+hg5580a_mtd_index() {
+	awk -v n="$1" '
+		{
+			i = index($0, ":")
+			if (i == 0)
+				next
+			idx = substr($0, 4, i - 4)
+			if ($0 ~ ("\"" n "\""))
+				print idx
+		}' /proc/mtd | head -n 1
+}
+
+hg5580a_ubi_for_mtd() {
+	for dev in /sys/class/ubi/ubi[0-9]*; do
+		[ -d "$dev" ] || continue
+		[ "$(cat "$dev/mtd_num" 2>/dev/null)" = "$1" ] && {
+			basename "$dev" | sed 's/^ubi//'
+			return 0
+		}
+	done
+	return 1
+}
+
+hg5580a_ubi_has_vol() {
+	for f in /sys/class/ubi/ubi"$1"_*/name; do
+		[ -f "$f" ] || continue
+		[ "$(cat "$f" 2>/dev/null)" = "$2" ] && return 0
+	done
+	return 1
+}
+
+start() {
+	idx=$(hg5580a_mtd_index overlay)
+	[ -n "$idx" ] || {
+		logger -t hg5580a-overlay "no overlay partition, nothing to do"
+		return 0
+	}
+
+	if ! ubi=$(hg5580a_ubi_for_mtd "$idx"); then
+		ubiattach -m "$idx" >/dev/null 2>&1 || {
+			# not formatted as UBI yet: format it, then attach
+			ubiformat /dev/mtd"$idx" -y >/dev/null 2>&1
+			ubiattach -m "$idx" >/dev/null 2>&1
+		}
+		ubi=$(hg5580a_ubi_for_mtd "$idx")
+		[ -n "$ubi" ] || {
+			logger -t hg5580a-overlay "failed to attach mtd$idx as UBI"
+			return 1
+		}
+	fi
+
+	if ! hg5580a_ubi_has_vol "$ubi" overlay; then
+		ubimkvol /dev/ubi"$ubi" -N overlay -m >/dev/null 2>&1
+	fi
+
+	if hg5580a_ubi_has_vol "$ubi" overlay; then
+		logger -t hg5580a-overlay "ubi$ubi:overlay (mtd$idx) ready"
+	else
+		logger -t hg5580a-overlay "ubi$ubi attached but overlay volume missing"
+		return 1
+	fi
+
+	return 0
+}

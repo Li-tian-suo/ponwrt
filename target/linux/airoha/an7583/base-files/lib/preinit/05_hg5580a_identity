@@ -1,0 +1,196 @@
+#!/bin/sh
+#
+# Populate the "identity" MTD partition from the vendor data in the "factory"
+# UBI volume, so the DTS nvmem-cells (fh_base_mac / fh_lan_mac / fh_pon_serial
+# / fh_pon_mac) read real values instead of 0xFF.
+#
+# Why this is needed
+# ------------------
+# The DTS declares:
+#     identity {
+#         compatible = "nvmem-cells";
+#         fh_base_mac:  mac-address@0  { reg = <0x0  0x6>; };
+#         fh_lan_mac:   mac-address@6  { reg = <0x6  0x6>; };
+#         fh_pon_serial: pon-serial@c  { reg = <0xc  0x8>; };
+#         fh_pon_mac:   mac-address@14 { reg = <0x14 0x6>; };
+#     };
+#
+# but on a stock unit the partition is entirely 0xFF.  The kernel then gets
+# ff:ff:ff:ff:ff:ff for every nvmem read, the driver rejects it as unusable,
+# and falls back to a random MAC shared by the whole controller:
+#
+#     GDM1 has no usable MAC, using 6e:21:0f:24:de:94
+#     eth0 lan2 lan3 lan4 all end up with that same address
+#
+# and the PON stack logs:
+#
+#     airoha-xpon: ignoring invalid default PON serial (8 bytes)
+#
+# The real values live in /factory (UBI volume ubi0_0) as an 'option value'
+# key/value store:
+#
+#     brmac      = 24:E3:A4:96:2F:20     -> fh_base_mac
+#     eth1mac..4 = 24:E4:A4:96:2F:41..44 -> fh_lan_mac (uses eth1mac)
+#     ponmac     = 24:E3:A4:96:2F:20     -> fh_pon_mac
+#     SerialNumber = 3085224E3A4962F20   -> fh_pon_serial (derived)
+#
+# Note the vendor deliberately uses a DIFFERENT OUI for the copper ports
+# (24:E4:A4) than for the bridge/PON (24:E3:A4).  The driver's
+# airoha_set_macaddr() rejects GDMs whose top three bytes disagree, which is
+# why the two OUIs cannot simply be mixed within one controller; lan1 is on
+# its own GDM (gdm3) so it takes the copper OUI, while gdm1/gdm2 share the
+# bridge OUI.
+#
+# Layout written (must match the DTS reg values):
+#     0x00  6 bytes  base MAC   (bridge / gdm1)
+#     0x06  6 bytes  LAN MAC    (gdm3, i.e. lan1)
+#     0x0c  8 bytes  PON serial
+#     0x14  6 bytes  PON MAC    (gdm2)
+#
+# Idempotent: if identity already holds a non-0xFF base MAC, do nothing.
+#
+
+. /lib/functions.sh
+
+IDENTITY_DEV=/dev/mtd13
+IDENTITY_MTD=identity
+FACTORY_DIR=/factory
+TMPMNT=/tmp/.identity-factory
+
+log() { echo "hg5580a-identity: $*"; }
+
+# ---------------------------------------------------------------- read factory
+
+# The factory volume is ubifs; mount it read-only if it is not already mounted.
+mount_factory() {
+    [ -d "$FACTORY_DIR" ] && [ -f "$FACTORY_DIR/factory_conf" ] && return 0
+
+    # ubi0 attaches read-only (write-protected) so mount ro.
+    mkdir -p "$TMPMNT"
+    if mount -t ubifs -o ro ubi0_0 "$TMPMNT" 2>/dev/null; then
+        FACTORY_DIR="$TMPMNT"
+        return 0
+    fi
+    if mount -t ubifs -o ro ubi0:rootfs "$TMPMNT" 2>/dev/null; then
+        FACTORY_DIR="$TMPMNT"
+        return 0
+    fi
+    return 1
+}
+
+# get_conf <key> [file] -> prints the 'option value' for that key
+get_conf() {
+    local key="$1"
+    local file="${2:-$FACTORY_DIR/factory_conf}"
+    [ -f "$file" ] || return 1
+    awk -v k="$key" '
+        $0 == "config key '\''"k"'\''" { found = 1; next }
+        found && /option value/ {
+            sub(/^[^\047]*\047/, "")
+            sub(/\047.*$/, "")
+            print
+            exit
+        }
+        found && /^config key/ { exit }
+    ' "$file"
+}
+
+# ------------------------------------------------------------- mac conversions
+
+# "24:E3:A4:96:2F:20" -> 6 raw bytes on stdout
+mac_to_raw() {
+    local m="$1"
+    local IFS=':'
+    # shellcheck disable=SC2086
+    set -- $m
+    [ $# -eq 6 ] || return 1
+    printf "$(printf '\\x%s' "$1" "$2" "$3" "$4" "$5" "$6")"
+}
+
+# "3085224E3A4962F20" (hex string) -> 8 raw bytes, or derive from MAC
+# The vendor string is 17 chars of hex; take the first 16 and pack them.
+serial_to_raw() {
+    local s="$1"
+    local n=${#s}
+    [ "$n" -ge 16 ] || return 1
+    s=$(printf '%s' "$s" | cut -c1-16)
+    i=0
+    out=""
+    while [ "$i" -lt 16 ]; do
+        byte=$(printf '%s' "$s" | cut -c$((i + 1))-$((i + 2)))
+        out="$out\\x$byte"
+        i=$((i + 2))
+    done
+    printf "$(printf '%s' "$out")"
+}
+
+# ------------------------------------------------------------------- main logic
+
+log "checking whether identity needs to be populated"
+
+CUR=$(dd if="$IDENTITY_DEV" bs=1 count=6 2>/dev/null | hexdump -v -e '6/1 "%02x"')
+if [ -n "$CUR" ] && [ "$CUR" != "ffffffffffff" ]; then
+    log "identity already holds base MAC $CUR, nothing to do"
+    exit 0
+fi
+
+log "identity is blank; reading vendor data"
+
+if ! mount_factory; then
+    log "ERROR: cannot mount the factory volume; leaving identity untouched"
+    exit 0
+fi
+log "factory mounted at $FACTORY_DIR"
+
+RMAC=$(get_conf brmac)
+LMAC=$(get_conf eth1mac)
+PMAC=$(get_conf ponmac)
+SER=$(get_conf SerialNumber)
+
+log "brmac=$RMAC eth1mac=$LMAC ponmac=$PMAC SerialNumber=$SER"
+
+for v in "$RMAC" "$LMAC" "$PMAC"; do
+    if [ -z "$v" ]; then
+        log "ERROR: missing MAC in factory_conf; not writing identity"
+        exit 0
+    fi
+done
+
+BASERAW=$(mac_to_raw "$RMAC") || { log "ERROR: brmac not parseable"; exit 0; }
+LANRAW=$(mac_to_raw "$LMAC") || { log "ERROR: eth1mac not parseable"; exit 0; }
+PONRAW=$(mac_to_raw "$PMAC") || { log "ERROR: ponmac not parseable"; exit 0; }
+
+if [ -n "$SER" ]; then
+    SERRAW=$(serial_to_raw "$SER") || SERRAW=""
+else
+    SERRAW=""
+fi
+# No usable serial number means PON registration cannot work; leave the field
+# 0xFF rather than inventing one, so the kernel keeps reporting it clearly.
+[ -n "$SERRAW" ] || { log "WARNING: no derivable PON serial; leaving it blank"; SERRAW='\xff\xff\xff\xff\xff\xff\xff\xff'; }
+
+log "writing identity"
+{
+    printf "$BASERAW"          # 0x00 base MAC
+    printf "$LANRAW"           # 0x06 lan1 MAC
+    printf "$SERRAW"           # 0x0c PON serial
+    printf "$PONRAW"           # 0x14 PON MAC
+} > /tmp/.identity.bin
+
+SIZE=$(wc -c < /tmp/.identity.bin)
+log "built $SIZE bytes"
+hexdump -C /tmp/.identity.bin
+
+mtd erase "$IDENTITY_MTD"
+mtd write /tmp/.identity.bin "$IDENTITY_MTD"
+
+VERIFY=$(dd if="$IDENTITY_DEV" bs=1 count=26 2>/dev/null | hexdump -v -e '26/1 "%02x"')
+log "identity now: $VERIFY"
+
+if [ "$VERIFY" = "ffffffffffffffffffffffffffffffffffffffffffffffffffff" ]; then
+    log "ERROR: write did not take effect"
+    exit 1
+fi
+
+log "done; reboot for the kernel to pick up the new MACs"
+exit 0
