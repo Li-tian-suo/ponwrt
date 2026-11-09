@@ -228,15 +228,35 @@ jobs:
           make defconfig
           # defconfig can re-enable NAIVE_OUTBOUND; force it off again.
           sed -i 's/^CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND=y$/# CONFIG_SING_BOX_BUILD_NAIVE_OUTBOUND is not set/' .config
+
+          # configs/an7583.config ships CONFIG_PACKAGE_fitblk=m together with
+          # CONFIG_MODULE_DEFAULT_fitblk=y, and a defconfig pass can put it back
+          # to =m.  A module would not be in the rootfs, and the UBI image needs
+          # the binary present at boot to release the FIT rootfs as a block
+          # device -- so force =y after defconfig as well.
+          sed -i 's/^CONFIG_PACKAGE_fitblk=m$/CONFIG_PACKAGE_fitblk=y/' .config
+          sed -i 's/^# CONFIG_PACKAGE_fitblk is not set$/CONFIG_PACKAGE_fitblk=y/' .config
+          grep -q '^CONFIG_PACKAGE_fitblk=' .config || echo 'CONFIG_PACKAGE_fitblk=y' >> .config
+
           make prepare-tmpinfo
 
           echo "--- device selection ---"
           grep -E '^CONFIG_TARGET_DEVICE_airoha.*=y' .config || {
             echo "::error::no airoha device selected"; exit 1; }
+          # Only the UBI variant may be selected.  configs/an7583.config also
+          # enables the two nokia targets; leaving them on wastes build time and
+          # produces firmware nobody asked for.
+          others=$(grep -E '^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_.*=y$' .config \
+                   | grep -v 'fiberhome_hg5580a-ubi=y' | wc -l)
+          if [ "$others" -ne 0 ]; then
+            echo "::error::unexpected extra devices selected:"
+            grep -E '^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_.*=y$' .config | grep -v 'fiberhome_hg5580a-ubi=y'
+            exit 1
+          fi
           grep -q '^CONFIG_TARGET_DEVICE_airoha_an7583_DEVICE_fiberhome_hg5580a-ubi=y' .config || {
             echo "::error::UBI variant not selected"; exit 1; }
           grep -q '^CONFIG_PACKAGE_fitblk=y' .config || {
-            echo "::error::fitblk not selected"; exit 1; }
+            echo "::error::fitblk not built into the image (must be =y, not =m)"; exit 1; }
           grep -q '^CONFIG_PACKAGE_kmod-airoha-paged-bosa=y' .config || {
             echo "::error::kmod-airoha-paged-bosa not selected"; exit 1; }
           echo "--- package count ---"
