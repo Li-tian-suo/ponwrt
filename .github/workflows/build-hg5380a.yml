@@ -62,11 +62,19 @@ jobs:
 
       - name: Provide libffi
         run: |
-          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败
-          git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
-          git -C /tmp/owrt sparse-checkout set package/libs/libffi
-          mkdir -p package/libs
-          cp -a /tmp/owrt/package/libs/libffi package/libs/
+          # immortalwrt/packages 缺 libs/libffi，任何拉入 python3 的配置都会失败。
+          # 仓库里已自带一份（package/libs/libffi，3.8.0 + 22 个 patches），
+          # 优先用它，只有缺失时才回退到从 openwrt 主树取，避免联网覆盖掉自带版本。
+          if [ -f package/libs/libffi/Makefile ]; then
+            echo "OK: 使用仓库自带的 package/libs/libffi"
+            grep -E '^PKG_(VERSION|HASH)' package/libs/libffi/Makefile || true
+          else
+            echo "WARN: 仓库未自带 libffi，回退到 openwrt 主树"
+            git clone --depth 1 --filter=blob:none --sparse https://github.com/openwrt/openwrt /tmp/owrt
+            git -C /tmp/owrt sparse-checkout set package/libs/libffi
+            mkdir -p package/libs
+            cp -a /tmp/owrt/package/libs/libffi package/libs/
+          fi
 
       - name: Install feeds
         run: ./scripts/feeds install -a
