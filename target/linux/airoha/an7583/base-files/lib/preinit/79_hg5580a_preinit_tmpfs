@@ -1,0 +1,165 @@
+#!/bin/sh
+#
+# Prepare /tmp and the UBIFS overlay before fstools' mount_root runs.
+#
+# Why both of these are needed
+# ----------------------------
+# This board boots with the squashfs image mounted directly as "/" (bootargs:
+# root=/dev/mtdblock5 rootfstype=squashfs).  Two things follow from that:
+#
+# 1. /tmp is an empty directory inside the read-only squashfs during preinit.
+#    fstools' mount_root() starts with
+#
+#        if (!getenv("PREINIT") && stat("/tmp/.preinit", &s))
+#                return -1;
+#
+#    so with no writable /tmp and no PREINIT it silently bails out and the
+#    system comes up still rooted on squashfs: hostname (none), empty /overlay,
+#    no UCI config, no network.
+#
+# 2. The overlay partition has to be an attached UBI device with a volume
+#    named "overlay".  fstools' ubi driver looks for exactly that:
+#
+#        ubi_volume_find(name)  -> scans /dev/ubiN, ubi_part_match(name, N)
+#        ubi_volume_identify()  -> always FS_UBIFS
+#
+#    If the volume is not attached yet, mount_root finds nothing usable and
+#    falls back to ramoverlay (tmpfs), i.e. no persistence.
+#
+# Why UBIFS and not JFFS2
+# -----------------------
+# JFFS2 cannot be used on this board.  Formatting /dev/mtd8 as jffs2 fails on
+# the first open with
+#
+#     jffs2: cannot read OOB for EB at 017c0000, requested 8 bytes,
+#            read 8 bytes, error -74
+#     mount: mounting /dev/mtdblock8 on /overlay failed: I/O error
+#
+# -74 is EBADMSG, an uncorrectable ECC error in the OOB area.  JFFS2 needs to
+# write an erase counter into every eraseblock's OOB during format and aborts on
+# the first one it cannot read.  UBI handles the same flash perfectly:
+#
+#     ubi1: attached mtd8 (name "overlay", size 24 MiB)
+#     ubi1: good PEBs: 192, bad PEBs: 0, corrupted PEBs: 0
+#
+# so the partition is formatted as UBI and the overlay filesystem is UBIFS.
+#
+# Sequence (runs just before 80_mount_root)
+# -----------------------------------------
+#   a. mount tmpfs on /tmp, drop the /tmp/.preinit sentinel, export PREINIT
+#   b. find the MTD index of the "overlay" partition
+#   c. attach it as a UBI device (formatting it first if it is not UBI yet)
+#   d. make sure a volume named "overlay" exists
+# Then mount_root - which we let run normally - finds ubiN:overlay, mounts it
+# as UBIFS on /overlay and pivots / onto the overlayfs.
+
+# ---------------------------------------------------------------------------
+# a. writable /tmp
+# ---------------------------------------------------------------------------
+hg5580a_preinit_tmpfs() {
+	if ! grep -qs ' /tmp ' /proc/mounts; then
+		mkdir -p /tmp
+		mount -t tmpfs -o mode=1777,noatime,nosuid,nodev tmpfs /tmp 2>/dev/null
+	fi
+	[ -d /tmp ] && : > /tmp/.preinit 2>/dev/null
+	PREINIT=1
+	export PREINIT
+}
+
+# ---------------------------------------------------------------------------
+# helper: mtd index of a partition by name
+# ---------------------------------------------------------------------------
+hg5580a_mtd_index() {
+	_hg_name="$1"
+	awk -v n="$_hg_name" '
+		{
+			# format: mtdN: SIZE ERASESIZE "name"
+			i = index($0, ":")
+			if (i == 0)
+				next
+			idx = substr($0, 4, i - 4)
+			if ($0 ~ ("\"" n "\""))
+				print idx
+		}' /proc/mtd | head -n 1
+}
+
+# ubi device number currently attached to a given mtd index, else empty
+hg5580a_ubi_for_mtd() {
+	_hg_mtd="$1"
+	for _hg_dev in /sys/class/ubi/ubi[0-9]*; do
+		[ -d "$_hg_dev" ] || continue
+		_hg_num=$(cat "$_hg_dev/mtd_num" 2>/dev/null)
+		if [ "$_hg_num" = "$_hg_mtd" ]; then
+			basename "$_hg_dev" | sed 's/^ubi//'
+			return 0
+		fi
+	done
+	return 1
+}
+
+# volume name present on a given ubi device?
+hg5580a_ubi_has_vol() {
+	_hg_ubi="$1"
+	_hg_want="$2"
+	for _hg_v in /sys/class/ubi/ubi"$_hg_ubi"_*/name; do
+		[ -f "$_hg_v" ] || continue
+		[ "$(cat "$_hg_v" 2>/dev/null)" = "$_hg_want" ] && return 0
+	done
+	return 1
+}
+
+# ---------------------------------------------------------------------------
+# b/c/d. attach the overlay partition as UBI and make the volume
+# ---------------------------------------------------------------------------
+hg5580a_preinit_ubi_overlay() {
+	_hg_idx=$(hg5580a_mtd_index overlay)
+	if [ -z "$_hg_idx" ]; then
+		echo "hg5580a-preinit: no 'overlay' partition in /proc/mtd" >&2
+		return 0
+	fi
+
+	# already attached?
+	if hg5580a_ubi_for_mtd "$_hg_idx" >/dev/null; then
+		:
+	else
+		# Try to attach.  If the partition holds no UBI data yet the attach
+		# fails; format it and try once more.
+		if ! ubiattach -m "$_hg_idx" >/dev/null 2>&1; then
+			ubiformat /dev/mtd"$_hg_idx" -y >/dev/null 2>&1
+			ubiattach -m "$_hg_idx" >/dev/null 2>&1
+		fi
+	fi
+
+	_hg_ubi=$(hg5580a_ubi_for_mtd "$_hg_idx")
+	if [ -z "$_hg_ubi" ]; then
+		echo "hg5580a-preinit: could not attach mtd$_hg_idx as UBI" >&2
+		return 0
+	fi
+
+	# create the volume fstools is looking for, using all remaining space
+	if ! hg5580a_ubi_has_vol "$_hg_ubi" overlay; then
+		ubimkvol /dev/ubi"$_hg_ubi" -N overlay -m >/dev/null 2>&1
+	fi
+
+	# report on the serial console via the kernel log, so a boot capture
+	# shows whether this stage did its job
+	if [ -w /dev/kmsg ]; then
+		if hg5580a_ubi_has_vol "$_hg_ubi" overlay; then
+			printf 'hg5580a-preinit: overlay = ubi%s:overlay (mtd%s) ready\n' \
+				"$_hg_ubi" "$_hg_idx" > /dev/kmsg
+		else
+			printf 'hg5580a-preinit: ubi%s attached but no overlay volume\n' \
+				"$_hg_ubi" > /dev/kmsg
+		fi
+	fi
+}
+
+# ---------------------------------------------------------------------------
+# registration: order matters, this must precede do_mount_root from 80_mount_root
+# ---------------------------------------------------------------------------
+hg5580a_preinit_all() {
+	hg5580a_preinit_tmpfs
+	hg5580a_preinit_ubi_overlay
+}
+
+boot_hook_add preinit_main hg5580a_preinit_all

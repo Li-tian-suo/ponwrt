@@ -353,9 +353,32 @@
 			reg = <0x5f00000 0x2000000>;
 		};
 
+		/*
+		 * overlay 只取 24 MiB，不是厂商那段的完整 72 MiB。
+		 *
+		 * 原因：这块 NAND 在这一段的后半部分有多个 ECC 不可纠正的
+		 * 坏块。实测两次格式化分别撞到分区内偏移 0x04700000 和
+		 * 0x047c0000（物理 0xC600000 / 0xC6C0000），报
+		 *   jffs2: cannot read OOB for EB at 047c0000, error -74
+		 *   mount_root: failed to mount -t jffs2 /dev/mtdblock8
+		 * 结果 overlay 挂不上，系统退回 tmpfs，主机名变 (none)，
+		 * 所有配置不持久。
+		 *
+		 * JFFS2 在格式化时要写擦除计数器，只要扫到坏块就整块失败。
+		 * 把分区限制在坏块之前（0x7f00000 + 0x1800000 = 0x9700000，
+		 * 远早于 0xC600000）就能稳定工作。
+		 *
+		 * 24 MiB 对这台机器足够：实测运行时 overlay 只用了 2.4 MB。
+		 * 剩下的 0x9700000..0xc700000 留给 apps 之外的用处。
+		 */
 		partition@7f00000 {
 			label = "overlay";
-			reg = <0x7f00000 0x4800000>;
+			reg = <0x7f00000 0x1800000>;
+		};
+
+		partition@9700000 {
+			label = "apps_data";
+			reg = <0x9700000 0x3000000>;
 		};
 
 		partition@c700000 {
