@@ -6,11 +6,36 @@ name: Build HG5580A UBI + U-Boot (AN7583 FiberHome)
 # ------------------------------------------------------------
 # build-hg5580a.yml targets device/fiberhome_hg5580a, which produces a vendor
 # KernelX container (mtd-kernel.bin + mtd-rootfs.bin) for the STOCK U-Boot
-# 2023.04's `ldkernel`.  That layout is now superseded: on real hardware
-# (verified) the flash keeps the stock 10-partition table and UBI lives inside
-# the `apps` partition at 0x5f00000 (104 MiB).  The matching firmware is
-# device/fiberhome_hg5580a-ubi, whose sysupgrade payload is a single .itb that
-# our U-Boot boots from the `fit` volume.
+# 2023.04's `ldkernel`.
+#
+# This workflow targets device/fiberhome_hg5580a-ubi instead, whose sysupgrade
+# payload is a single .itb that our U-Boot boots from the UBI `fit` volume.
+#
+# The partition table is NOT the stock one.  An earlier revision carved UBI out of
+# the stock `apps` window (0x5f00000 + 104 MiB) and that turned out to be broken on
+# hardware: the window fully covers the vendor's apps/overlay/apps_data, so merely
+# booting the vendor firmware overwrote our UBI container --
+#
+#   ubi0 error: scan_peb: bad image sequence number -730722252 in PEB 1
+#   ubi0 error: ubi_attach_mtd_dev: failed to attach mtd7, error -22
+#
+# and with UBI unattachable the bosa and ri volumes were unreadable, so the BOSA
+# driver had no calibration and pon0 never appeared.
+#
+# The current layout gives UBI one contiguous window that no stock partition
+# overlaps, sized by two hard constraints in the boot chain:
+#
+#   plat/ecnt/en7523/bl2_boot_nand_ubi.c   UBI_START_ADDR 0x20000
+#   net/lwip/httpd.c                       bl2 must be exactly one eraseblock
+#
+#   bl2        0x00000000  0x00020000   128 KiB
+#   ubi        0x00020000  0x0e6e0000   ends exactly at factory
+#   factory    0x0e700000  0x00500000   read-only, outside the UBI window
+#   bosacal    0x0ec00000  0x00020000   read-only
+#   identity   0x0ec20000  0x00020000   read-only
+#
+# Because factory / bosacal / identity sit outside the window, a ubi-rebuild
+# cannot destroy the MAC address, PON serial or optical calibration.
 #
 # This workflow therefore builds two things that must ship together:
 #
@@ -357,6 +382,22 @@ jobs:
 
           sh uboot-port/patch-tfa-unsigned.sh /tmp/uboot/tf-a
 
+          # SPI-NAND: this board ships with one of two flash parts, and upstream's
+          # foresee.c only knows the F35SQA family (device IDs 0x71/0x72).  The
+          # production batch reports raw ID "cd 52 52", which upstream rejects:
+          #
+          #   spi_nand nand@0: unknown raw ID cd 52 52 cd
+          #
+          # and then never registers the NAND device, so U-Boot cannot read the
+          # flash it is booting from.  The patch adds F35SQB002G (device ID 0x52)
+          # with the same 2 KiB page / 64-byte OOB geometry as F35SQA002G.
+          patch -p1 -d /tmp/uboot < uboot-port/patches/foresee-f35sqb002g.diff
+          grep -q 'F35SQB002G' /tmp/uboot/drivers/mtd/nand/spi/foresee.c || {
+            echo "::error::FORESEE F35SQB002G patch did not apply"; exit 1; }
+          grep -q '0x52, 0x52' /tmp/uboot/drivers/mtd/nand/spi/foresee.c || {
+            echo "::error::FORESEE device ID 0x52 missing after patching"; exit 1; }
+          echo "FORESEE F35SQB002G registered"
+
           # Web recovery enhancement: "Download all" plus a per-file MD5 so a
           # restore can be verified.  Shipped as a diff against upstream's
           # net/lwip/httpd-page.html.
@@ -481,8 +522,8 @@ jobs:
           {
             echo "## PonWrt for FiberHome HG5580A"
             echo ""
-            echo "Airoha AN7583 XG-PON ONU · SkyHigh ML02G300WH100 256 MiB SPI-NAND"
-            echo "U-Boot 2026.07 + TF-A 2.10 · UBI layout inside the stock \`apps\` partition"
+            echo "Airoha AN7583 XG-PON ONU · 256 MiB SPI-NAND (SkyHigh ML02G300WH100 or FORESEE F35SQB002G)"
+            echo "U-Boot 2026.07 + TF-A 2.10 · single UBI window, factory kept outside it"
             echo ""
             echo "### Files"
             echo ""
@@ -494,7 +535,7 @@ jobs:
               case "$n" in
                 *sysupgrade*|*squashfs*) p="system firmware (write to UBI \`fit\`)" ;;
                 *initramfs*)             p="recovery / RAM boot, does not touch flash" ;;
-                *preloader*)             p="BL2, write to NAND offset 0x0" ;;
+                *preloader*)             p="BL2 FIP, goes at NAND offset 0x800 inside the 128 KiB bl2 block" ;;
                 *fip)                    p="BL31 + U-Boot, write to UBI \`fip\`" ;;
                 *SUMS*)                  p="checksums" ;;
                 *)                       p="" ;;
@@ -504,33 +545,37 @@ jobs:
             echo ""
             echo "### Partition layout"
             echo ""
-            echo "The stock FiberHome 10-partition table is kept. UBI lives entirely"
-            echo "inside \`apps\` (0x5f00000, 104 MiB), so **\`factory\` is never written**."
+            echo "The stock 14-partition table is **not** kept. UBI gets one contiguous"
+            echo "window that nothing else overlaps, sized by two constraints in the boot"
+            echo "chain (BL2 looks for UBI at 0x20000; U-Boot requires bl2 to be exactly"
+            echo "one eraseblock). \`factory\`, \`bosacal\` and \`identity\` sit outside the"
+            echo "window, so a rebuild cannot destroy the MAC, PON serial or calibration."
             echo ""
             echo '```'
-            echo "0x0000000 0x280000  bootloader    stock BL2+FIP"
-            echo "0x0280000 0x080000  bootflag      stock A/B selector"
-            echo "0x0300000 0x600000  KernelA       stock slot A"
-            echo "0x0900000 0x2800000 RootfsA       stock slot A"
-            echo "0x3100000 0x600000  KernelB       stock slot B"
-            echo "0x3700000 0x2800000 RootfsB       stock slot B"
-            echo "0x5f00000 0x6800000 apps      ->  UBI (104 MiB)"
-            echo "0xc700000 0x1000000 frameworka"
-            echo "0xd700000 0x1000000 frameworkb"
-            echo "0xe700000 0x500000  factory       never written"
+            echo "0x0000000 0x020000  bl2           BL2 FIP at +0x800"
+            echo "0x0020000 0xe6e0000 ubi           the only managed region"
+            echo "0xe700000 0x500000  factory       MAC / PON serial / calibration, read-only"
+            echo "0xec00000 0x020000  bosacal       BOSA calibration, read-only"
+            echo "0xec20000 0x020000  identity      identity mirror, read-only"
             echo '```'
             echo ""
             echo "### Install"
             echo ""
             echo "Back up \`factory\` first, then in the U-Boot Web UI at http://192.168.0.1/:"
             echo ""
-            echo "1. **Rebuild UBI** — formats \`apps\`, creates fip/ubootenv/bosa/ri"
-            echo "2. **Flash U-Boot** — write the \`.fip\` into the UBI \`fip\` volume"
-            echo "3. **Install system** — write the \`.itb\` into the UBI \`fit\` volume"
-            echo "4. **Boot system**"
+            echo "1. **Rebuild UBI** — formats \`ubi\`, creates fip/ubootenv/ubootenv2/bosa/ri"
+            echo "2. **Flash board data** — write the 256 KiB \`bosa\` and \`ri\` payloads;"
+            echo "   a rebuild creates these as *empty* volumes, and without calibration"
+            echo "   the BOSA driver never probes, so \`pon0\` stays missing"
+            echo "3. **Flash U-Boot** — write the \`.fip\` into the UBI \`fip\` volume"
+            echo "4. **Install system** — write the \`.itb\` into the UBI \`fit\` volume"
+            echo "5. **Boot system**"
             echo ""
-            echo "Flash \`preloader.bin\` last: it replaces the bootloader partition and is"
-            echo "the only step that can require XMODEM recovery."
+            echo "Flash the BL2 last, and note the size rule: the upload must be exactly"
+            echo "131072 bytes (one eraseblock) with the FIP at offset 0x800. A shorter"
+            echo "upload takes the handler's other branch, which memsets the block to 0xFF"
+            echo "and destroys the ARM32 entry code at 0x0..0x800 — the board then has no"
+            echo "bootable code and needs an external programmer."
             echo ""
             echo "Full guide: [docs/hg5580a-flash-guide.md](https://github.com/${{ github.repository }}/blob/${{ github.ref_name }}/docs/hg5580a-flash-guide.md)"
             echo ""
