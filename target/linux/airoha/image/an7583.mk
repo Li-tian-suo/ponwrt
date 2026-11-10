@@ -175,9 +175,14 @@ define Device/fiberhome_hg5580a
 	#
 	# 本机 2.5G PHY 是 Motorcomm YT8821（MDIO 0x07，ID 0x4f51ea19），
 	# DTS 里用 ethernet-phy-ieee802.3-c22 通用绑定，带 motorcomm 驱动更稳。
+	#
+	# luci-app-pon 提供 PON 的管理页面（status/config/diagnostics/hardware
+	# 四个视图 + airoha-pon-data 后端），数据来源就是 airoha-ponctl 的
+	# status/--json。不加这个包，LuCI 里没有 PON 菜单，
+	# /usr/lib/lua/luci/controller/ 会是空的，只能用串口敲 ponctl。
 	DEVICE_PACKAGES := kmod-phy-motorcomm \
 		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
-		airoha-ponctl airoha-pond
+		airoha-ponctl airoha-pond luci-app-pon
 	IMAGES := sysupgrade.bin mtd-kernel.bin mtd-rootfs.bin
 	IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
 		pad-rootfs | append-metadata
