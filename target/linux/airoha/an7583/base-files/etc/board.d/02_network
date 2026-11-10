@@ -17,10 +17,25 @@ an7583_setup_interfaces()
 	nokia,xg-040g-mf|\
 	nokia,xg-040g-mf-ubi|\
 	fiberhome,hg5380a|\
-	fiberhome,hg5580a)
-		# Add four copper ports to br-lan and bind wan directly to pon0.
+	fiberhome,hg5380a-ubi|\
+	fiberhome,hg5580a|\
+	fiberhome,hg5580a-ubi)
+		# Add the copper ports to br-lan and bind wan directly to pon0.
 		# Opening wan starts the pon0 PMA, PLOAM, and OMCI lifecycle.
-		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "pon0"
+		#
+		# The -ubi variants must be listed explicitly: board_name comes from
+		# the DTS root compatible, and the UBI images set
+		#
+		#     compatible = "fiberhome,hg5580a-ubi", "airoha,an7583";
+		#
+		# so matching only "fiberhome,hg5580a" falls through to the *)
+		# branch and prints "Unsupported hardware. Network interfaces not
+		# initialized".  The visible effect is that /etc/config/network is
+		# never created, lan2/lan3/lan4 stay uninitialised, br-lan has no
+		# address, and LuCI is unreachable on 192.168.1.1 -- while the serial
+		# console looks perfectly healthy, which makes it easy to misread as a
+		# firewall or uhttpd problem.
+		ucidef_set_interfaces_lan_wan "lan2 lan3 lan4" "pon0"
 		;;
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"
