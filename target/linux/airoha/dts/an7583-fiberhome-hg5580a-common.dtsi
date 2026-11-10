@@ -136,37 +136,29 @@
 		compatible = "gpio-leds";
 
 		/*
-		 * 2.5G PHY 复位释放 —— 原厂 DTS 的 leds/an8811_reset 节点，
-		 * GPIO28(0x1c)、低有效、default-state="off"。
+		 * 【历史说明，保留以便对照原厂 DTS】
+		 *
+		 * 原厂这里有两个节点：
+		 *   leds/an8811_reset           GPIO28 低有效 default-state="off"
+		 *   leds/phy_tx_power_disable   GPIO15 高有效 default-state="on"
 		 *
 		 * 名字里的 "an8811" 是原厂沿用的旧称，本机实测 PHY 是
-		 * Motorcomm YT8821（ID 0x4f51ea19 @ MDIO 0x07），引脚位置相同。
+		 * Motorcomm YT8821（ID 0x4f51ea19 @ MDIO 0x07）。
 		 *
-		 * 【为什么必须保留】gpio-leds 用 default-state 把这条线驱动出去：
-		 *   低有效 + "off" => 输出被拉高 => 复位释放 => PHY 正常工作。
-		 * 如果这个节点不存在，GPIO28 保持上电默认态，PHY 可能一直停在
-		 * 复位里，表现为 mdio 读不到、2.5G 口不通。
-		 * 所以它不是"指示灯"，是复位控制，删掉会坏。
-		 */
-		/*
-		 * 2.5G PHY 发送使能 —— 原厂 DTS 的 leds/phy_tx_power_disable 节点，
-		 * GPIO15(0x0f)、高有效、default-state="on"。
+		 * 两个节点都已被移出 gpio-leds：
 		 *
-		 * 【注意这个节点的名字和实际电平是反的】
-		 * 名字叫 disable，但 flags=0x00 是高有效、状态是 "on"，
-		 * 也就是把 GPIO15 驱动为**高**。5380A 与 5580A 的原厂 DTS
-		 * 在这一行完全一致（5380A dtb-3100.dts），说明这是平台级
-		 * 固定接法，不是某一台机器的笔误。
+		 *   an8811_reset   -> 改成 PHY 节点的 reset-gpios，见 &mdio_0 下面
+		 *                     yt8821 的说明。用 leds 间接拉高只是电平对，
+		 *                     驱动拿不到 reset_gpio，那次硬复位从来没执行。
 		 *
-		 * 与 an8811_reset 的区别：
-		 *   an8811_reset         GPIO28 低有效 + "off" => 输出高 => 复位释放
-		 *   phy_tx_power_disable GPIO15 高有效 + "on"  => 输出高
-		 * 两条线最终都是高电平，但一个走低有效+off、一个走高有效+on，
-		 * 语义不同，不能合并，也不能靠"反正都是高"就删掉其中一个：
-		 * 删掉 phy_tx_power_disable 会让 GPIO15 停在上电默认态，
-		 * 2.5G PHY 的发送通路可能不使能，表现为链路起不来但 mdio 可读。
+		 *   phy_tx_power_disable
+		 *                  -> 改成 BOSA 节点的 tx-disable-gpios，见
+		 *                     hg5580a_bosa。原厂名字和电平是反的（叫
+		 *                     disable 但高有效且 on，即驱动为高），保留原厂
+		 *                     写法便于逐行对照。
 		 *
-		 * 保留原厂名字（含 disable 字样），便于和厂商 DTS 逐行对照。
+		 * 电平行为都不变，变的只是"谁持有这根线"，以及由此带来的
+		 * 驱动内部状态。同一个 GPIO 不能被两个消费者同时持有。
 		 */
 
 
@@ -475,18 +467,29 @@
 	 * yt8821_config_init() 里按 phydev->interface 分支，2500BASEX 时只配置
 	 * SerDes 侧，铜口那一侧照常自动协商。所以插普通网线是能协商的。
 	 *
-	 * 实测记录（2026-11-11，lan1 插 2.5G 电口）：
+	 * 实测记录（2026-11-11，lan1 插 2.5G 电口，修复前）：
 	 *   Supported link modes:        2500baseX/Full, 2500baseT/Full
 	 *   Advertised auto-negotiation: No
 	 *   Auto-negotiation:            off
 	 *   Duplex:                      Half
 	 *   Link detected:               no
 	 * PHY 识别正常（phy_id 0x4f51ea19，driver "YT8821 2.5Gbps PHY"），
-	 * MDIO 正常（mdio-bus@c8-mii:07 存在），GPIO 也正常：
-	 *   gpio-28 (an8811_reset)  out hi ACTIVE LOW   => 复位已释放
-	 *   gpio-15 (tx-disable)    out hi              => 发送已使能
-	 * 所以链路起不来不是 PHY/GPIO/MDIO 的问题，需要从 SerDes 与对端
-	 * 是否都工作在 2.5G 固定速率这个方向继续查。
+	 * MDIO 正常（mdio-bus@c8-mii:07 存在），PCS 正常（eth_pcs okay），
+	 * GPIO 电平也正常：
+	 *   gpio-28  out hi ACTIVE LOW   复位已释放（当时由 leds 节点驱动）
+	 *   gpio-15  out hi              发送已使能
+	 *
+	 * 但电平对不等于复位发生过。GPIO28 当时归 gpio-leds 的 an8811_reset
+	 * 所有，PHY 驱动的 mdio 层拿不到 reset_gpio，于是
+	 * mdio_device_reset() 第一行就 return：
+	 *
+	 *     if (!mdiodev->reset_gpio && !mdiodev->reset_ctrl)
+	 *             return;
+	 *
+	 * yt8821_config_init() 开头那次硬复位（驱动注释写明是为了清掉 MDIO
+	 * 总线冲突留下的寄存器污染）因此从未执行，SerDes 初始化跑在一个
+	 * 不确定的寄存器基线上。修复见 &mdio_0 下面 yt8821 节点的
+	 * reset-gpios，那里有完整说明。
 	 */
 	phy-mode = "2500base-x";
 
