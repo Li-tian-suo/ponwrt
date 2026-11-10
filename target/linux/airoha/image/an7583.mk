@@ -222,3 +222,54 @@ define Device/fiberhome_hg5580a
 
 endef
 TARGET_DEVICES += fiberhome_hg5580a
+
+# ---------------------------------------------------------------------------
+# FiberHome HG5580A (UBI) -- pairs with the U-Boot in uboot-port/.
+#
+# Differences from the stock-layout variant above:
+#   * no vendor KernelX container: the new U-Boot boots a FIT directly
+#   * kernel and U-Boot environment live in UBI volumes, not raw partitions
+#   * the sysupgrade payload is a single .itb, matching what the U-Boot
+#     environment's bootfile_upg expects
+#
+# 这一段对应实际刷进设备的镜像。上面那个 fiberhome_hg5580a 产出的是
+# sysupgrade.bin / mtd-kernel.bin / mtd-rootfs.bin，走原厂分区布局；
+# 本板已改成单 UBI 布局（mtd0 all_flash / mtd1 bl2 / mtd2 ubi /
+# mtd3 factory / mtd4 bosacal / mtd5 identity），所以要用这个 -ubi 变体。
+# ---------------------------------------------------------------------------
+define Device/fiberhome_hg5580a-ubi
+	$(call Device/FitImageLzma)
+	DEVICE_VENDOR := FiberHome
+	DEVICE_MODEL := HG5580A
+	DEVICE_VARIANT := (UBI)
+	DEVICE_DTS := an7583-fiberhome-hg5580a-ubi
+	# The platform default (0x80200000, from image/Makefile's loadaddr-y) lands
+	# inside the NPU reserved windows declared in an7583.dtsi: those start at
+	# 0x84000000, and a 28 MiB lzma payload from 0x80200000 expands past that
+	# boundary, so lmb rejects the load with
+	#   Unable to allocate memory 0x80200000 for loading OS
+	# 0x88000000 is clear of them (NPU ends 0x86e00000) and below U-Boot.
+	KERNEL_LOADADDR := 0x88000000
+	BLOCKSIZE := 128k
+	PAGESIZE := 2048
+	UBOOTENV_IN_UBI := 1
+	KERNEL_IN_UBI := 1
+	KERNEL := kernel-bin | gzip
+	KERNEL_INITRAMFS := kernel-bin | lzma | \
+		fit lzma $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb with-initrd | pad-to 128k
+	KERNEL_INITRAMFS_SUFFIX := -recovery.itb
+	IMAGES := sysupgrade.itb
+	IMAGE/sysupgrade.itb := append-kernel | \
+		fit gzip $$(KDIR)/image-$$(firstword $$(DEVICE_DTS)).dtb external-static-with-rootfs | \
+		append-metadata
+	# fitblk 让内核从 UBI 卷 fit 里读 rootfs（cmdline 有 ubi.block=0,fit）。
+	#
+	# luci-app-pon 提供 PON 的管理页面（status/config/diagnostics/hardware
+	# 四个视图 + airoha-pon-data 后端），数据来源就是 airoha-ponctl。
+	# 不加这个包，LuCI 里没有 PON 菜单，/usr/lib/lua/luci/controller/
+	# 会是空的，只能用串口敲 ponctl。
+	DEVICE_PACKAGES := kmod-phy-motorcomm \
+		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
+		airoha-ponctl airoha-pond fitblk luci-app-pon
+endef
+TARGET_DEVICES += fiberhome_hg5580a-ubi
