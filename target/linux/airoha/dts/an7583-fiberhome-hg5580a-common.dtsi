@@ -170,11 +170,24 @@
 		 */
 
 
-		an8811_reset {
-			label = "an8811_reset";
-			gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
-			default-state = "off";
-		};
+		/*
+		 * an8811_reset（GPIO28 低有效）不再写成 LED 节点。
+		 *
+		 * 原做法是靠 leds-gpio 的 "低有效 + default-state=off" 把线间接
+		 * 拉高，效果只是"复位释放"，而且只在 LED 类探测时发生一次。
+		 * motorcomm 的 yt8821_config_init() 却要靠 phy_device_reset()
+		 * 做一次真实的复位脉冲来清掉 MDIO 总线冲突留下的寄存器污染，
+		 * 那个函数只在 PHY 节点有 reset-gpios 时才动作。
+		 *
+		 * 现在复位线绑在 &mdio_0 下面的 yt8821 节点上：
+		 *
+		 *     reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
+		 *
+		 * 同一个 GPIO 不能被两个消费者同时持有（后者 -EBUSY），所以这个
+		 * LED 节点必须删掉。它本来也不是指示灯，名字是原厂沿用的旧称。
+		 *
+		 * 电平行为不变：低有效 + 驱动释放复位 = 引脚输出高。
+		 */
 
 		/*
 		 * 电源灯：原厂 DTS 用 GPIO30(0x1e)、低有效、default-state="on"。
@@ -352,10 +365,46 @@
 	 * 沿用 0x07（与 5380A 参考设计一致）。若启动后 PHY 认不到，改 0x00 即可。
 	 * 用 "ethernet-phy-ieee802.3-c22" 让内核自己读 ID，读到 0x4f51ea19
 	 * 就会绑上 motorcomm 驱动（DEVICE_PACKAGES 里已带 kmod-phy-motorcomm）。
+	 *
+	 * 【reset-gpios 为什么必须写在这里】
+	 *
+	 * 本板的 PHY 复位是 GPIO28、低有效。之前这个引脚只出现在 gpio-leds 的
+	 * an8811_reset 节点里，靠 "低有效 + default-state=off" 间接把线拉高，
+	 * 等于只在 LED 类探测时驱动一次，PHY 驱动自己完全不知道有复位线。
+	 *
+	 * 后果直接写在 motorcomm 的 yt8821_config_init() 里：
+	 *
+	 *     phy_device_reset(phydev, 1);      // 拉低复位
+	 *     ...
+	 *     phy_lock_mdio_bus(phydev);
+	 *     phy_device_reset(phydev, 0);      // 释放复位
+	 *     ytphy_modify_ext(..., YTPHY_MACR_EN_PHY_ADDR_0, 0);
+	 *     phy_unlock_mdio_bus(phydev);
+	 *     ...
+	 *     yt8821_serdes_init(phydev);
+	 *     yt8821_utp_init(phydev);
+	 *
+	 * phy_device_reset() 只有在 PHY 设备声明了复位 GPIO 时才动作。没有
+	 * reset-gpios 时它什么也不做，驱动以为自己完成了一次硬复位，实际
+	 * 芯片状态取决于上电默认值和 LED 类的驱动时序。MDIO 总线冲突导致的
+	 * 寄存器污染也就清不掉——而这家驱动的注释正说明硬复位就是为了清理
+	 * 这种污染。
+	 *
+	 * 这片树里其他板子都在 PHY 节点上写 reset-gpios，an7583-evb-emmc.dts
+	 * 用的就是同一个引脚：
+	 *
+	 *     reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
+	 *
+	 * 所以这里照同样的写法补上。加上之后 GPIO28 由 PHY 驱动持有，上面
+	 * 那个 leds/an8811_reset 节点就不能再申请同一个引脚（同一引脚被两个
+	 * 消费者申请，第二个会 -EBUSY），因此它已被删除，见文件顶部的说明。
 	 */
 	yt8821: ethernet-phy@7 {
 		compatible = "ethernet-phy-ieee802.3-c22";
 		reg = <0x7>;
+		reset-gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
+		reset-assert-us = <10000>;
+		reset-deassert-us = <100000>;
 	};
 };
 
