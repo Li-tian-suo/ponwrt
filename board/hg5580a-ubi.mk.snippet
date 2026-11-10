@@ -24,6 +24,17 @@ define Device/fiberhome_hg5580a-ubi
   # describes 14 partitions with a JFFS2 overlay and bootargs pointing at
   # root=/dev/mtdblock5, neither of which exists on the UBI layout.
   DEVICE_DTS := an7583-fiberhome-hg5580a-ubi
+  # The platform default (0x80200000, from image/Makefile's loadaddr-y) lands
+  # inside the NPU reserved windows declared in an7583.dtsi, which start at
+  # 0x84000000.  A 28 MiB lzma payload loaded at 0x80200000 expands past that
+  # boundary, so lmb refuses the allocation:
+  #
+  #   Uncompressing Kernel Image to 80200000
+  #   Unable to allocate memory 0x80200000 for loading OS
+  #
+  # Confirmed on hardware.  0x88000000 sits clear of the NPU windows (they end
+  # at 0x86e00000) and well below U-Boot at ~0x9ea89370.
+  KERNEL_LOADADDR := 0x88000000
   BLOCKSIZE := 128k
   PAGESIZE := 2048
   UBOOTENV_IN_UBI := 1

@@ -163,6 +163,23 @@ jobs:
             echo "::error::hg5580a-ubi block lacks fitblk"; exit 1
           fi
 
+          # KERNEL_LOADADDR must be set explicitly.  The platform default is
+          # 0x80200000, which overlaps the NPU reserved windows in an7583.dtsi
+          # (they start at 0x84000000); a 28 MiB lzma kernel loaded there grows
+          # past the boundary and lmb aborts with
+          #   Unable to allocate memory 0x80200000 for loading OS
+          # This was reproduced on hardware and fixed by moving to 0x88000000,
+          # so a regression here would only surface on a real board -- catch it
+          # at build time instead.
+          block=$(sed -n '/define Device\/fiberhome_hg5580a-ubi/,/^TARGET_DEVICES += fiberhome_hg5580a-ubi/p' \
+                  target/linux/airoha/image/an7583.mk)
+          if ! printf '%s\n' "$block" | sed 's/#.*//' | grep -q 'KERNEL_LOADADDR *:= *0x88000000'; then
+            echo "::error::hg5580a-ubi must set KERNEL_LOADADDR := 0x88000000 (NPU window collision)"
+            printf '%s\n' "$block" | grep -n 'KERNEL_LOADADDR' || true
+            exit 1
+          fi
+          echo "KERNEL_LOADADDR check passed"
+
       - name: Trim feeds
         run: |
           sed -i '/^src-git video /d; /^src-git telephony /d' feeds.conf.default
