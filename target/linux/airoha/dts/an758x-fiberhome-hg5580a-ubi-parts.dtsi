@@ -18,12 +18,12 @@
  * BOSA driver had no calibration to bind to, so pon0 never appeared at all.
  *
  * The fix is to stop sharing the flash with the vendor layout.  UBI now owns one
- * contiguous 190.5 MiB window that no stock partition overlaps.
+ * contiguous window that no stock partition overlaps.
  *
  * Layout
  * ------
- *   0x00000000  0x00280000  bl2       vendor BL2 + FIP, read-only
- *   0x00280000  0x0e480000  ubi       228.5 MiB, the only managed region
+ *   0x00000000  0x00020000  bl2       128 KiB, writable
+ *   0x00020000  0x0e6e0000  ubi       242 MiB, the only managed region
  *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
  *   0x0ec00000  0x00020000  bosacal   BOSA calibration, read-only
  *   0x0ec20000  0x00020000  identity  vendor identity mirror, read-only
@@ -32,9 +32,20 @@
  * touch overlaps the three read-only data partitions, so a UBI rebuild can never
  * destroy the MAC address, the PON serial or the optical calibration again.
  *
- * Note there is no separate bootloader/FIP partition: bl2 is the first 2.5 MiB,
- * which is the vendor BL2 plus FIP pair.  It is marked read-only because the
- * vendor FIP carries a signature our build cannot reproduce.
+ * bl2 differs between the two device trees, on purpose
+ * ----------------------------------------------------
+ * U-Boot marks bl2 writable because flash-bl2 erases and rewrites it, and
+ * mtdpart turns "read-only" into a cleared MTD_WRITEABLE bit after which mtdcore
+ * returns -EPERM from every erase and write.
+ *
+ * Linux marks it read-only because the kernel never writes bl2 -- bootloader
+ * updates go through U-Boot's web API -- so the flag is a safety net against a
+ * stray write, not a functional requirement.
+ *
+ * Sizes and offsets must match everywhere.  Writability legitimately does not:
+ * each tree describes what its own consumer needs.  The kernel DTB and
+ * uboot-port/dts/an7583-fiberhome-hg5580a.dts therefore agree on geometry and
+ * disagree on this one flag.
  *
  * This file must stay in sync with uboot-port/dts/an7583-fiberhome-hg5580a.dts.
  * If the label or size of the UBI partition differs, U-Boot looks for a
@@ -81,6 +92,16 @@
 		 *      and it writes the preloader FIP at offset 0x800 inside it.
 		 *
 		 * The earlier 2.5 MiB size satisfied neither.
+		 */
+		/*
+		 * Read-only here: the kernel never writes bl2, and the flag stops a
+		 * stray write from bricking the unit.  U-Boot's copy of this table
+		 * omits the property because flash-bl2 must erase the partition;
+		 * mtdpart clears MTD_WRITEABLE when "read-only" is present, and
+		 * mtdcore then returns -EPERM from mtd_erase().
+		 *
+		 * Geometry is identical in both trees -- only writability differs,
+		 * because each describes what its own consumer needs.
 		 */
 		partition@0 {
 			label = "bl2";
