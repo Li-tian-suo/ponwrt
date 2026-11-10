@@ -1,499 +1,397 @@
-# BOSA 光学校准：从 `fiberhomebdbob` 到 `APONCAL`
+# APONCAL 容器格式：128 字节头 + 两处 CRC-32
 
-> 记录一个只靠日志猜不出来的问题：驱动报告 `calibration invalid`，
-> 而校准数据明明写进去了、位置也对、型号也识别了。
+> 这份文档替代早前靠反汇编写出的版本。
 >
-> 结论来自反汇编 `airoha-paged-bosa.ko`，不是猜测。
+> 早前那版有 **8 处错误**，其中一个致命：漏掉了两处 CRC-32 校验，
+> 导致构造出的校准块永远被判 `invalid`。
+>
+> 错误全部来自"只读反汇编、没读源码"。源码一直在
+> `feeds/pon_drivers/airoha-pon-frontends/src/` 里。
 
 ---
 
-## 1. 现象
-
-刷完单 UBI 布局后，PonWrt 正常启动，`pon0`、`omci0`、`oam0` 全部出现，
-MAC 地址正确，驱动栈全部绑定：
+## 1. 源码位置
 
 ```
-airoha_en7572              16384  0
-airoha_paged_bosa          16384  1        ← refcount 非零，说明绑定了
-airoha_pon_frontend_core   12288  3        airoha_paged_bosa,airoha_en7572,airoha_xpon
-airoha_xpon                77824  0
+feeds/pon_drivers/airoha-pon-frontends/
+├── README.md
+└── src/
+    ├── airoha-paged-bosa.h              枚举与结构
+    ├── airoha-paged-bosa-main.c         probe / bosa_load_calibration
+    ├── airoha-paged-bosa-ux3363.c       ux3363_identify / ux3363_apply
+    └── airoha-paged-bosa-gn28l95.c      另一款模块
 ```
 
-但内核日志里有一句：
+README 只有一句关键信息：
 
-```
-[12.321264] airoha-paged-bosa 0-0051: UX3363 frontend registered,
-            ID 55583333363331, calibration invalid
-```
-
-同时 `ponctl status` 显示：
-
-```
-[frontend]
-  calibration: invalid
-  rx_power_dbm: -40.00
-[line]
-  lifecycle: stopped
-  optical_signal: 0
-  xgtc_sync: hunt
-[registration]
-  onu_state: O1
-  serial_configured: 0
-```
-
-因果链很明确：
-
-```
-calibration invalid → 驱动拒绝启动（lifecycle: stopped）
-                    → 序列号无法生效（serial_configured: 0）
-                    → PON 完全不工作
-```
-
-**先要确认的是：校准数据到底有没有被读到。**
+| Provider | Devices | Calibration source |
+| --- | --- | --- |
+| `airoha-en7572` | EN7572 | 512-byte BOB NVMEM cell |
+| `airoha-paged-bosa` | GN28L95, UX3363 | `APONCAL` NVMEM cell or board firmware |
 
 ---
 
-## 2. 排除：数据是读到了，位置也对
+## 2. 常量（全部在 main.c 头部）
 
-### 2.1 卷里的内容
-
-```
-# hexdump -C /dev/ubi0_3
-00000000  00 00 41 50 4f 4e 43 41  4c 00 01 00 80 00 00 00  |..APONCAL.......|
-```
-
-早期版本里是厂商表：
-
-```
-00000000  ff ff 66 69 62 65 72 68  6f 6d 65 62 64 62 6f 62  |..fiberhomebdbob|
-00000010  00 00 32 30 32 34 30 34  32 39 31 35 35 39 56 42  |..202404291559VB|
+```c
+#define AIROHA_BOSA_CAL_MAGIC       "APONCAL\0"
+#define AIROHA_BOSA_CAL_VERSION     1
+#define AIROHA_BOSA_CAL_HEADER_SIZE 0x80
+#define AIROHA_BOSA_CAL_NATIVE      1
 ```
 
-`fiberhomebdbob` 从卷偏移 `0x02` 开始，正好对应 DTS：
-
-```dts
-ubi-volume-bosa {
-	volname = "bosa";
-	nvmem-layout {
-		compatible = "fixed-layout";
-		bosa_calibration: calibration@2 { reg = <0x2 0x800>; };
-	};
+```c
+/* airoha-paged-bosa.h */
+enum airoha_bosa_calibration_id {
+	AIROHA_BOSA_CAL_GN28L95 = 1,
+	AIROHA_BOSA_CAL_UX3363 = 2,
 };
 ```
 
-### 2.2 phandle 链也是对的
-
-设备上实测：
-
-```
-/proc/device-tree/.../partition@20000/volumes/ubi-volume-bosa/
-    nvmem-layout/calibration@2/phandle = 00 00 00 1e
-
-/sys/bus/i2c/devices/0-0051/of_node/nvmem-cells = 00 00 00 1e
-```
-
-两边都是 `0x1e`，**驱动确实通过 bosa 卷读取校准**。
-
-### 2.3 型号识别来自硬件，不是校准
-
-日志里的 `ID 55583333363331` 一度被误认为是从校准数据里读出的型号。
-反汇编 `ux3363_identify` 后否定了这个假设：
-
-```asm
-0000000000000fe0 <ux3363_identify>:
-     ffc:  mov  w1, #0xffffff87          ; page -121 = 0x87
-    1000:  bl   airoha_paged_bosa_select_page
-    102c:  add  x2, sp, #0x39            ; buffer
-    1034:  mov  x3, #0x7                 ; read 7 bytes
-    1038:  mov  w1, #0xffffff80          ; register 0x80
-    103c:  bl   airoha_paged_bosa_read
-
-    1060:  ldur w1, [sp, #57]            ; first 4 bytes
-    1064:  mov  w0, #0x5855              ; 'U','X'
-    1068:  movk w0, #0x3333, lsl #16     ; '3','3'
-    106c:  cmp  w1, w0                   ; == "UX33" ?
-    1070:  b.ne fail
-
-    1074:  ldurh w1, [sp, #61]           ; next 2 bytes
-    1078:  mov  w0, #0x3336              ; '3','6'
-    107c:  cmp  w1, w0                   ; == "36" ?
-    1080:  b.ne fail
-```
-
-**这段代码走的是 I2C 硬件路径（页 `0x87`、寄存器 `0x80`），与校准卷完全无关。**
-所以 `ID 55583333363331`（ASCII `UX33631`）是光模块硬件的真实回应。
-
-**结论：校准确实被读取了，位置正确，但内容格式不被接受。**
+**`calibration_id` 从 1 开始，所以 0 是非法值。** 早前填 0，
+`bosa_chip_by_id(0)` 返回 NULL，走 `-ENODEV` 分支。
 
 ---
 
-## 3. 真正的契约：`APONCAL` 头
+## 3. 完整头结构
 
-反汇编 `bosa_probe`，在 `nvmem_cell_read` 之后有一整段校验：
-
-```asm
-   134:  ldr  x2, [sp]              ; cell 长度
-   138:  cmp  x2, #0x7f
-   13c:  b.ls FAIL                  ; 长度必须 > 127
-
-   140:  ldr  x3, [x0]              ; 前 8 字节
-   144:  mov  x1, #0x5041           ; 'A','P'
-   148:  movk x1, #0x4e4f, lsl 16   ; 'O','N'
-   14c:  movk x1, #0x4143, lsl 32   ; 'C','A'
-   150:  movk x1, #0x4c,   lsl 48   ; 'L','\0'
-   154:  cmp  x3, x1
-   158:  b.ne FAIL                  ; 魔数 "APONCAL\0"
-
-   15c:  ldrh w3, [x0, #10]
-   160:  ldr  w4, [x0, #12]
-   164:  ldrh w1, [x0, #8]
-   168:  cmp  w3, #0x80             ; [0x0a] == 0x80
-   16c:  str  w4, [x19, #136]       ; [0x0c] 存入 priv+136
-   170:  ccmp w1, #0x1, #0x0, eq    ; [0x08] == 1
-   174:  b.ne FAIL
-
-   178:  ldr  w1, [x0, #16]
-   17c:  cmp  w1, #0x1
-   180:  b.ne FAIL                  ; [0x10] == 1
-
-   184:  sub  x2, x2, #0x80         ; 剩余 = cell_len - 0x80
-   18c:  ldr  w25, [x0, #20]
-   190:  cmp  x25, x2
-   194:  b.ls OK                    ; [0x14] <= cell_len - 0x80
-   198:  kfree; return -EINVAL
-```
-
-### 结构定义（小端，偏移相对 cell 起点）
-
-| 偏移 | 类型 | 要求 | 含义 |
+| 偏移 | 类型 | 值 | 含义 |
 | --- | --- | --- | --- |
 | `0x00` | `char[8]` | `"APONCAL\0"` | 魔数 |
 | `0x08` | `u16` | `1` | 版本 |
-| `0x0a` | `u16` | `0x0080` | 头部长度 |
-| `0x0c` | `u32` | 任意 | 存入 priv+136 |
-| `0x10` | `u32` | `1` | 标志 |
-| `0x14` | `u32` | `<= cell_len - 0x80` | 载荷长度 |
+| `0x0a` | `u16` | `0x0080` | 头长度 |
+| `0x0c` | `u32` | `2` | `calibration_id`（UX3363） |
+| `0x10` | `u32` | `1` | `NATIVE` 标志 |
+| `0x14` | `u32` | `0x780` | 载荷长度 |
+| `0x18` | `u32` | CRC | **载荷 CRC-32** |
+| `0x1c..0x7b` | — | 0 | 保留 |
+| `0x7c` | `u32` | CRC | **头部 CRC-32**（覆盖 `0x00..0x7b`） |
 | `0x80` | — | — | 载荷起点 |
 
-**厂商的 `fiberhomebdbob` 表第一字节是 `0x66`（`'f'`），而驱动要的是 `0x41`（`'A'`）。
-一个字节都不匹配，所以走到 `FAIL`，状态置为 `CALIBRATION_INVALID`。**
+---
 
-驱动模块里的字符串清单也印证了这一点：
+## 4. 校验逻辑（bosa_load_calibration 全文）
 
+```c
+static int bosa_load_calibration(struct airoha_paged_bosa *bosa)
+{
+	struct device *dev = &bosa->client->dev;
+	struct nvmem_cell *cell;
+	u8 *data;
+	u32 header_crc, payload_crc, payload_length;
+	u16 header_size, version;
+	size_t cell_size;
+	int ret = 0;
+
+	cell = devm_nvmem_cell_get(dev, "calibration");
+	if (IS_ERR(cell))
+		return PTR_ERR(cell);
+	data = nvmem_cell_read(cell, &cell_size);
+	if (IS_ERR(data))
+		return PTR_ERR(data);
+
+	if (cell_size < AIROHA_BOSA_CAL_HEADER_SIZE ||
+	    memcmp(data, AIROHA_BOSA_CAL_MAGIC, 8)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	version        = get_unaligned_le16(data + 0x08);
+	header_size    = get_unaligned_le16(data + 0x0a);
+	bosa->calibration_id = get_unaligned_le32(data + 0x0c);
+	payload_length = get_unaligned_le32(data + 0x14);
+	header_crc     = get_unaligned_le32(data + 0x7c);
+
+	if (version != AIROHA_BOSA_CAL_VERSION ||
+	    header_size != AIROHA_BOSA_CAL_HEADER_SIZE ||
+	    get_unaligned_le32(data + 0x10) != AIROHA_BOSA_CAL_NATIVE ||
+	    payload_length > cell_size - header_size ||
+	    (crc32_le(~0U, data, 0x7c) ^ ~0U) != header_crc) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	payload_crc = get_unaligned_le32(data + 0x18);
+	if ((crc32_le(~0U, data + header_size, payload_length) ^ ~0U) !=
+	    payload_crc) {
+		ret = -EBADMSG;
+		goto out;
+	}
+
+	if (!bosa_chip_by_id(bosa->calibration_id)) {
+		ret = -ENODEV;
+		goto out;
+	}
+
+	bosa->calibration = devm_kmemdup(dev, data + header_size,
+	                                 payload_length, GFP_KERNEL);
+	if (!bosa->calibration) {
+		ret = -ENOMEM;
+		goto out;
+	}
+	bosa->calibration_length = payload_length;
+out:
+	kfree(data);
+	return ret;
+}
 ```
-AIROHA_PON_FRONTEND_CALIBRATION_READY
-AIROHA_PON_FRONTEND_CALIBRATION_MISSING
-AIROHA_PON_FRONTEND_CALIBRATION_INVALID
-AIROHA_PON_FRONTEND_CALIBRATION_NOT_REQUIRED
-AIROHA_PON_FRONTEND_CALIBRATION_UNKNOWN
+
+### 状态映射
+
+```c
+if (!calibration_ret) {
+	bosa->calibration_state = AIROHA_PON_FRONTEND_CALIBRATION_READY;
+} else if (calibration_ret == -ENOENT || calibration_ret == -ENODEV ||
+           calibration_ret == -ENODATA) {
+	bosa->calibration_state = AIROHA_PON_FRONTEND_CALIBRATION_MISSING;
+} else {
+	bosa->calibration_state = AIROHA_PON_FRONTEND_CALIBRATION_INVALID;
+}
 ```
 
-`MISSING` 与 `INVALID` 是两个不同状态：前者表示 cell 不存在，后者表示读到了但内容不合格。
-我们拿到的是 `INVALID`，正好对应"读到了、格式不对"。
+所以：
+
+| 返回 | 状态 |
+| --- | --- |
+| `0` | `ready` |
+| `-ENOENT` / `-ENODEV` / `-ENODATA` | `missing` |
+| `-EINVAL` / `-EBADMSG` / `-ENOMEM` | **`invalid`** |
+
+**设备上看到的是 `invalid`，说明走到的是 `-EINVAL` 或 `-EBADMSG`。**
+
+`-ENODEV`（`calibration_id` 无效）会显示 `missing` 而不是 `invalid` ——
+这一点排除了"只是 id 填错"的可能，说明头部校验先失败了。
 
 ---
 
-## 4. 一个容易忽略的边界条件
+## 5. CRC 算法：就是标准 CRC-32
 
-`[0x14] <= cell_len - 0x80` 这一条最初被算错了。
-
-DTS 声明 `reg = <0x2 0x800>`，所以 `cell_len = 0x800 = 2048`。
-那么边界是 `2048 - 128 = 1920`。
-
-**第一版构造脚本把 `[0x14]` 填成了 131072**（整个厂商表的大小），
-即使魔数正确也会在最后一步被拒绝：
-
-```
-[0x14] 131072 <= 1920  →  false
+```c
+#include <linux/crc32.h>
+(crc32_le(~0U, data, 0x7c) ^ ~0U)
 ```
 
-修正为 `payload_len = min(len(vendor_table), 1920) = 1920` 才通过。
+`crc32_le` 是 `linux/crc32.h` 的反射多项式 CRC-32（IEEE 802.3），
+初始值 `~0U`，结果再 `^ ~0U`。
 
-**教训：每个比较都要还原它的两个操作数，不能只看"有检查"。**
+**这与 `zlib.crc32` 完全等价** —— zlib 内部也做同样的初始和最终反转。
+所以 Python 里直接：
+
+```python
+import zlib
+header_crc = zlib.crc32(bytes(hdr[0x00:0x7c])) & 0xFFFFFFFF
+payload_crc = zlib.crc32(payload) & 0xFFFFFFFF
+```
+
+不需要自己实现位运算。
 
 ---
 
-## 5. 最小载荷：能让 probe 过，但不等于能用
+## 6. 载荷：1920 字节寄存器镜像
 
-因为 `[0x14]` 允许为 0（`0 <= 1920` 成立），**一个 24 字节的裸头就能让
-`bosa_probe` 通过**：
+```c
+/* airoha-paged-bosa-ux3363.c */
+#define UX_CALIBRATION_LENGTH 0x780
 
-```
-41 50 4f 4e 43 41 4c 00   "APONCAL\0"
-01 00                     version = 1
-80 00                     header  = 0x80
-00 00 00 00               field_0c
-01 00 00 00               field_10 = 1
-00 00 00 00               payload_len = 0
-```
+static int ux3363_apply(struct airoha_paged_bosa *bosa, const u8 *data,
+                        size_t length)
+{
+	u8 value;
+	int ret;
 
-在设备上可以直接用 `printf` 的八进制转义生成，不需要传输文件：
+	if (length != UX_CALIBRATION_LENGTH)
+		return -EINVAL;
 
-```sh
-printf '\101\120\117\116\103\101\114\000\001\000\200\000\000\000\000\000\001\000\000\000\000\000\000\000' > /tmp/hdr.bin
-```
-
-这条命令能在串口控制台上一次敲完，对没有网络或没有 `base64` 的环境特别有用。
-
-**重要限定：这个 24 字节头只解决 `bosa_probe`，不解决 PON。**
-
-反汇编 `ux3363_apply` 后才知道它第一件事就是（见 §10.1）：
-
-```asm
-10b8:  cmp  x2, #0x780
-10bc:  b.ne FAIL            ; 载荷长度必须精确 1920
+	/* Page 0x80, register 0xb7 bit 0 enables volatile configuration writes.
+	 * The payload uses the chip's native 0x780-byte register image. */
+	ret = airoha_paged_bosa_select_page(bosa, 0x80);
+	...
 ```
 
-所以裸头会让状态变成 `calibration: ready`，但 `ux3363_apply` 照样返回 `-EINVAL`，
-光模块的页不会被编程，PON 仍然起不来。
+### 完整切片表
 
-**裸头的用途是分阶段验证**：先确认头部契约理解正确（probe 过），
-再去解决载荷内容（1920 字节的模块 EEPROM 镜像，见 §10）。
+| 载荷偏移 | 长度 | 目标页 | 起始寄存器 |
+| --- | --- | --- | --- |
+| `0x100..0x17A` | 123 | `0x00` | `0x00` |
+| `0x200..0x26E` | 111 | `0x80` | `0x80` |
+| `0x280..0x2E8` | 105 | `0x81` | `0x80` |
+| `0x300..0x368` | 105 | `0x82` | `0x80` |
+| `0x380..0x3D3` | 84 | `0x84` | `0x80` |
+| `0x3D6..0x3DD` | 8 | `0x84` | `0xD6` |
+| `0x3E0..0x3EA` | 11 | `0x84` | `0xE0` |
+| `0x400..0x468` | 105 | `0x83` | `0x80` |
+
+**`0x000..0x0FF` 和 `0x469..0x77F` 驱动完全不读。**
+
+源码注释还解释了 `0xD6` 和 `0xE0` 为什么不是连续的：
+
+```c
+/* Registers 0xd4–0xd5 and 0xde–0xdf are reserved by the chip. */
+ret = ux3363_write_range(bosa, 0x84, 0xd6, data + 0x3d6, 8);
+ret = ux3363_write_range(bosa, 0x84, 0xe0, data + 0x3e0, 11);
+```
+
+### 写入前后动作
+
+```c
+/* 前置：使能易失写 */
+read   page 0x80 reg 0xb7
+if (!(value & BIT(0)))
+        write  page 0x80 reg 0xb7 = value | BIT(0)
+        sleep  10–11 ms
+
+... 八段切片 ...
+
+/* 中段：重新选页 0x80，逐寄存器写 111 字节 */
+for (value = 0; value < 111; value++) {
+        reg  = 0x80 + value;          /* 0x80 .. 0xEE */
+        byte = data[0x200 + value];
+        if (reg == 0xb7)
+                byte |= BIT(0);
+        write page 0x80 reg reg = byte
+        sleep (reg == 0xb7 ? 10–11 ms : 1–1.5 ms)
+}
+
+/* 收尾：TX_CONTROL 上做 1→0 脉冲 */
+read   reg 0x6e
+write  reg 0x6e = value | BIT(6)
+sleep  10–11 ms
+write  reg 0x6e = value & ~BIT(6)
+sleep  10–11 ms
+```
 
 ---
 
-## 6. 写入 UBI 卷的正确方式
+## 7. 早前的 8 处错误
 
-### 6.1 直接 dd 会失败
+| # | 早前记录 | 源码真相 | 后果 |
+| --- | --- | --- | --- |
+| 1 | 头部 24 字节够用 | 需要 128 字节 | `cell_size < 0x80` → `-EINVAL` |
+| 2 | 无 `header_crc` | `0x7c` 处 CRC 覆盖 `0x00..0x7b` | `-EINVAL` |
+| 3 | 无 `payload_crc` | `0x18` 处 CRC 覆盖载荷 | `-EBADMSG` |
+| 4 | `calibration_id = 0` | 必须 `2`（UX3363） | `-ENODEV` → `missing` |
+| 5 | `0x000..0x0B7` 是切片 | 驱动**不读**这段 | 写错位置 |
+| 6 | `0x200` → reg `0x00`，110 B | reg `0x80`，**111** B | 写错位置 |
+| 7 | `0x3D6` → reg `0x56` | reg **`0xD6`** | 写到保留寄存器 |
+| 8 | `0x3E0` → reg `0x60` | reg **`0xE0`** | 写到保留寄存器 |
 
-```
-# dd if=/tmp/hdr.bin of=/dev/ubi0_3 bs=1 seek=2 conv=notrunc
-dd: error writing '/dev/ubi0_3': Operation not permitted
-```
+第 7、8 项的原因：反汇编里是 `mov w2, #0xffffffd6`，
+**符号扩展后取低 8 位是 `0xD6`，不是 `0x56`。** 我算错了。
 
-UBI 卷不是普通块设备，**不能按偏移随机写**。即使卷状态是 `dynamic`、`State: OK`，
-普通写路径依然被拒。
-
-### 6.2 用 `ubiupdatevol` 整卷替换
-
-```sh
-# 生成一个完整尺寸的镜像
-dd if=/dev/zero of=/tmp/bosa.bin bs=1024 count=256     # 262144 字节
-
-# 把 APONCAL 头放到卷偏移 2（对应 calibration@2）
-dd if=/tmp/hdr.bin of=/tmp/bosa.bin bs=1 seek=2 conv=notrunc
-
-# 整卷写入
-ubiupdatevol /dev/ubi0_3 /tmp/bosa.bin
-```
-
-`ubiupdatevol` 会先擦除整个卷再顺序写入，这是唯一被允许的写入方式。
-
-### 6.3 校验
-
-```
-# hexdump -C /dev/ubi0_3 | head -2
-00000000  00 00 41 50 4f 4e 43 41  4c 00 01 00 80 00 00 00  |..APONCAL.......|
-00000010  00 00 01 00 00 00 00 00  00 00 00 00 00 00 00 00  |................|
-```
-
-`APONCAL` 出现在卷偏移 `0x02`，即 `calibration@2` 的 cell 起点。正确。
+第 5、6 项的原因：把循环 `data[0x200 + value]` 误读成 `data[value]`，
+凭空造出一个不存在的切片，同时把真实切片的起点和长度都算错。
 
 ---
 
-## 7. 让新校准生效
+## 8. 一个决定性的诊断依据
 
-`rmmod airoha_paged_bosa` 会失败：
+设备上看到的是：
 
 ```
-unloading the module failed
+airoha-paged-bosa 0-0051: UX3363 frontend registered, ID 55583333363331,
+                          calibration invalid
 ```
 
-因为 `pon0`、`omci0`、`oam0` 都占着它（refcount = 1），且即使 `ip link set ... down`
-也不会释放。
+**`invalid` 而不是 `missing`** —— 这个区别本身就是线索：
 
-**必须重启。** 但重启方式很重要，见下一节。
+- 如果是 `calibration_id` 错 → `-ENODEV` → 显示 `missing`
+- 显示 `invalid` → 只能走 `-EINVAL` 或 `-EBADMSG` → **头部结构或 CRC 错**
+
+所以早前的 24 字节裸头（无 CRC、id=0）理论上应该显示 `missing`，
+但实测显示 `invalid`，说明 `memcmp(data, "APONCAL", 8)` 之后更早的
+`cell_size < 0x80` 或魔数比较就失败了 —— 因为那个裸头只有 24 字节。
+
+**这条推理链在源码里闭合了。**
 
 ---
 
-## 8. 一个反面教材：不要用 `reboot`
+## 9. 构造与验证
 
-执行 `reboot` 之后设备完全静默：
+工具 `tools/build-aponcal.py` 按上面的规范生成容器，
+并在输出里逐条复现 `bosa_load_calibration` 的每一个判断：
 
 ```
-串口 115200 / 57600 / 38400 / 9600   全部静默
-192.168.0.1                          no reply
-192.168.1.1                          no reply
-串口适配器 USB-SERIAL CH340 (COM4)    status=OK（硬件本身没问题）
+header:
+  0x00  magic   b'APONCAL\x00'
+  0x08  u16     1            version
+  0x0a  u16     0x0080       header size
+  0x0c  u32     2            calibration_id (UX3363)
+  0x10  u32     1            native
+  0x14  u32     1920         payload length
+  0x18  u32     0x6a736a00   payload crc32
+  0x7c  u32     0x59030200   header crc32
+
+bosa_load_calibration checks:
+  [OK] cell_size >= header_size
+  [OK] magic == APONCAL\0
+  [OK] version == 1
+  [OK] header_size == 0x80
+  [OK] field_0x10 == NATIVE (1)
+  [OK] payload_len <= cell_size - header_size
+  [OK] header crc32 matches
+  [OK] payload crc32 matches
+  [OK] calibration_id == 2 (2)
 ```
 
-原因：**Linux 的 `reboot` 走 PSCI 热复位，跳过了 BL2 的完整初始化。**
-而 `ubiupdatevol` 刚改写过卷表，热复位时 UBI fastmap 状态可能不一致，
-BL2 挂载失败就没有任何输出。
+支持三种载荷来源：
 
-**正确做法是断电冷启动**，让 BL2 从头扫描 UBI。
-
-这一点在刷机流程里同样重要：第 ① 步 `flash-bl2` 之后到第 ⑤ 步 `flash-uboot`
-成功之前，**不要断电**；但写完所有卷之后，**要断电而不是 reboot**。
+```
+--payload zero              全零，用于先验证容器格式
+--payload FILE              1920 字节寄存器镜像（从模块读回）
+（默认）                     厂商 fiberhomebdbob 表，近似填充
+```
 
 ---
 
-## 9. 对照表：厂商格式 vs 驱动格式
+## 10. 分层验证策略
 
-| 项 | 厂商 `fiberhomebdbob` | 驱动 `APONCAL` |
-| --- | --- | --- |
-| 魔数 | `"fiberhomebdbob"` (14 B) | `"APONCAL\0"` (8 B) |
-| 版本 | 文本 `"202404291559VB"` | `u16` = 1 |
-| 头长 | 无明确定义 | `u16` @0x0a = 0x80 |
-| 型号位置 | 偏移 `0x95`，文本 `"ux3363"` | 由 I2C 硬件读取 |
-| 载荷长度 | 隐式 | `u32` @0x14，需 `<= cell-0x80` |
-| 谁认识它 | FiberHome 自己的内核 | `airoha-paged-bosa` |
+不要一次就指望 PON 起来。按这个顺序：
 
-**这两种格式互不兼容。** 厂商的校准块是给厂商固件用的，
-而开源驱动需要 Airoha 定义的结构。
+```
+第 1 层：--payload zero
+        目标：calibration 变成 ready
+        证明：容器格式正确（魔数、版本、长度、两处 CRC、chip id）
+        失败：说明头部还有问题，回到 §4 逐条对
 
-参考其他板子的 DTS 也能看出线索 —— `an7581-fiberhome-ubi-parts.dtsi` 里写着：
+第 2 层：--payload （厂商表近似填充）
+        目标：ready 且不报 I2C 错误
+        证明：八段切片都能写进模块
+        失败：大概率是某个页/寄存器映射错，看 dmesg 的 I2C 错误码
 
-```dts
-/* FiberHome BDBOB retains its 2048-byte binary format. */
-pon_calibration: calibration@0 {
-	reg = <0x0000 0x0800>;
-};
+第 3 层：--payload 从模块读回的镜像
+        目标：ready 且 pon0 carrier=1
+        证明：载荷语义正确
+        失败：载荷内容不对，需要另一台 calibrated 设备作参照
 ```
 
-注释说"保留其 2048 字节二进制格式"，但也只是把它原样暴露出来，
-**能否被驱动接受取决于驱动，而不是这段注释。**
+**每一层都产出一个明确的、可复现的结论。**
+这是把"PON 不起来"这种模糊问题拆成可判定步骤的唯一办法。
 
 ---
 
-## 10. 载荷的语义：它是光模块 EEPROM 的页镜像
+## 11. 方法论教训
 
-最初以为载荷是"校准系数表"，把它留给"需要参考设备才能解决"。
-继续反汇编 `ux3363_apply` 后完全否定了这个判断 —— **载荷结构是明确的**。
+这个项目里最贵的一课：
 
-### 10.1 函数入口就钉死了长度
+> **反汇编是最后手段，不是第一手段。**
 
-```asm
-00000000000010ac <ux3363_apply>:
-    10ac:  stp  x29, x30, [sp, #-64]!
-    10b8:  cmp  x2, #0x780              ; 第三个参数（载荷长度）必须精确等于 1920
-    10bc:  b.ne 12e4 <ux3363_apply+0x238>
-    ...
-    12e4:  mov  w19, #0xffffffea         ; -EINVAL
-```
+我花了大量时间反汇编 `airoha-paged-bosa.ko`，解出了大致结构，
+但因为反汇编不会显示：
 
-**`payload_len` 不是 1920 就直接返回 `-EINVAL`。**
-所以"24 字节裸头 + payload_len = 0"虽然能让 `bosa_probe` 通过
-（状态显示 `calibration: ready`），但 `ux3363_apply` 会在第一条比较上失败，
-PON 依然起不来。
+- 宏定义（`AIROHA_BOSA_CAL_*`）
+- 枚举值（`CAL_GN28L95 = 1`，所以 0 非法）
+- 源码注释（"Registers 0xd4–0xd5 and 0xde–0xdf are reserved"）
+- `crc32_le()` 的实际语义（看起来只是普通函数调用）
 
-### 10.2 载荷被切片写入模块的 I2C 页
+所以漏掉了整整两个校验步骤，解出的切片表也有 4 处偏移错。
 
-```asm
-    /* 页 0x80：逐字节写寄存器，从 0 到 0xB7 */
-    1268:  loop: ldrb  w2, [x21, w2, sxtw]   ; payload[index]
-    12ac:  mov   w1, w3
-    12b4:  cmp   w3, #0xb7
-    12b8:  b.ne  loop
-    12bc:  orr   w2, w2, #0x1                 ; 寄存器 0xB7 额外置 bit0
-    12c4:  bl    airoha_paged_bosa_write
+**源码在 `feeds/pon_drivers/` 里，第一次搜索就应该找到它。**
 
-    /* 页镜像搬运：注意每次 write_range 之前都有 w2 (起始寄存器) 和 w1 (页) */
-    115c/1160:  w2 = 0xffffff80, w1 = 0xffffff81   page 0x81, reg 0x00
-    1180/1184:  w2 = 0xffffff80, w1 = 0xffffff82   page 0x82, reg 0x00
-    11a4/11a8:  w2 = 0xffffff80, w1 = 0xffffff83   page 0x83, reg 0x00
-    11c8/11cc:  w2 = 0xffffff80, w1 = 0xffffff84   page 0x84, reg 0x00
-    11ec/11f0:  w2 = 0xffffffd6, w1 = 0xffffff84   page 0x84, reg 0x56
-    1210/1214:  w2 = 0xffffffe0, w1 = 0xffffff84   page 0x84, reg 0x60
-    1234/1238:  w2 = 0x00000000, w1 = 0x00000000   page 0x00, reg 0x00
-```
-
-**关键：`w1` 是页号，`w2` 是起始寄存器。** 最初只看 `x3`（源地址）和 `x4`（长度）
-是不够的 —— 目标页藏在紧邻的两条 `mov` 里，而且其中一条在长输出中被截断，
-导致 `0x100` 那一片一度找不到归属。
-
-`1238: mov w1, #0x0` 说明那 123 字节写的是**页 `0x00`，即模块的 A0h EEPROM**。
-
-### 10.3 完整切片表（9 片，全部已知）
-
-| 载荷偏移 | 长度 | 目标页 | 起始寄存器 | 说明 |
-| --- | --- | --- | --- | --- |
-| `0x000..0x0B7` | 184 | `0x80` | `0x00` | 第一遍逐字节写，到 `0xB7` |
-| `0x100..0x17A` | 123 | `0x00` | `0x00` | A0h EEPROM 镜像 |
-| `0x200..0x26D` | 110 | `0x80` | `0x00` | 第二遍逐字节写，到 `0x6D` |
-| `0x280..0x2E8` | 105 | `0x81` | `0x00` | 页镜像 |
-| `0x300..0x368` | 105 | `0x82` | `0x00` | 页镜像 |
-| `0x380..0x3D3` | 84 | `0x84` | `0x00` | 页镜像 |
-| `0x3D6..0x3DD` | 8 | `0x84` | `0x56` | 页镜像续 |
-| `0x3E0..0x3EA` | 11 | `0x84` | `0x60` | 页镜像续 |
-| `0x400..0x468` | 105 | `0x83` | `0x00` | 页镜像 |
-
-`0x469..0x77F` 驱动完全不读，留零即可。
-
-**注意页 `0x80` 被写了两次**：先 `0x000..0x0B7`（184 字节，一次性），
-然后 `0x200..0x26D`（110 字节，循环逐字节）。两次的用途不同，
-不能合并，也不能只写一次。
-
-### 10.4 收尾动作也解出来了
-
-```asm
-    1248:  mov   w1, #0xffffff80         ; 重新 select page 0x80
-    1250:  bl    airoha_paged_bosa_select_page
-    1260:  strb  wzr, [sp, #63]          ; 循环计数器清零
-
-    12ec:  read  reg 0x6e                ; 页 0x84 的 0x6e
-    1314:  orr   w2, w2, #0x40           ; 置 bit6
-    1318:  bl    airoha_paged_bosa_write
-    1330:  usleep 10-11 ms
-    1340:  and   w2, w2, #0xffffffbf     ; 清 bit6
-    1344:  bl    airoha_paged_bosa_write
-```
-
-这是给模块一个"重新加载配置"的脉冲，说明写入的页在模块侧会被缓存，
-需要这个动作才生效。**写入顺序不能打乱**：页 `0x00` 在所有页 `0x80-0x84`
-之后才写，如果提前写，`0x1248` 的重新选页就没有意义了。
-
-### 10.5 为什么厂商格式不能简单转换
+搜索路径记下来：
 
 ```
-fiberhomebdbob   592 字节有效数据，厂商内核自己的系数表
-APONCAL         1920 字节，光模块 EEPROM 的页镜像
-
-前者是"算出来的补偿值"，后者是"要烧进模块的寄存器内容"。
-不是同一层的东西，没有逐字节的映射关系。
+grep -rla 'APONCAL' /root/build/<target>/feeds/
+find /root/build/<target>/feeds -name '*<driver>*'
 ```
 
-### 10.6 一条实际的取得路径
-
-因为载荷是模块 EEPROM 的页镜像，**它可能本来就在模块里**。
-
-用厂商固件运行时，厂商内核驱动大概率已经把页面写进去了。如果那些页还在，
-就可以直接从模块读出来，拼成 APONCAL 载荷：
-
-```sh
-# 需要设备能启动，且模块已经处于被厂商驱动初始化过的状态
-# 1. select page 0x80，逐字节读 0x00..0xB7
-# 2. select page 0x81..0x84，按上表的长度读
-# 3. 按上表的偏移拼成 1920 字节
-# 4. 前面加 0x80 字节 APONCAL 头
-# 5. ubiupdatevol 写入
-```
-
-**这条路需要设备先恢复。** 而当前设备静默，那是第一优先级。
-
-### 10.7 诚实记录未完成的部分
-
-即使载荷结构完全清楚了，还缺一样东西：**这 1920 字节的具体内容**。
-
-- 如果模块 EEPROM 里还保留着厂商写入的页，可以读出来用（§10.6）
-- 如果模块被擦除过或从未写过，就只能从另一台 calibrated 设备取参考
-
-**这一步在当前条件下没有完成，不能假装完成。**
-但和最初的判断相比，问题已经从"不知道载荷是什么"缩小到
-"知道它是模块 EEPROM 镜像，缺具体的 1920 字节内容"。
-
----
-
-## 11. 可复用的诊断顺序
-
-遇到"驱动说某个数据块无效"时：
-
-1. **确认数据被读到了** —— 打印卷/分区的原始内容（`hexdump -C /dev/ubiX_Y`）
-2. **确认 phandle 链对** —— 对比 nvmem provider 的 `phandle` 和 consumer 的 `nvmem-cells`
-3. **确认不是别的东西** —— 有的"型号"其实来自 I2C/SPI 硬件，不是数据块
-4. **反汇编校验函数** —— `objdump -d` 加上 `awk '/<fn>:/,/^$/'` 逐条读比较指令
-5. **还原每个比较的两个操作数** —— 魔数字节、长度边界、版本号
-6. **用最小载荷验证** —— 只满足头部，载荷长度填 0，先让 probe 过
-7. **找同类设备的参考** —— 其它板子的 DTS 往往写着"这个格式是什么"
-
-这七步在本项目里把 `calibration invalid` 从"猜不出来"变成了"字节级明确"。
+只要目标串是驱动里的宏或字符串，`grep -a`（二进制也搜）就能定位到源码文件。

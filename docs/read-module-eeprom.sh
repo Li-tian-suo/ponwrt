@@ -1,45 +1,48 @@
 #!/bin/sh
 # Read the UX3363 module's EEPROM pages over I2C and assemble an APONCAL payload.
 #
-# Wire protocol, recovered from airoha-paged-bosa.ko rather than guessed:
+# Source of truth
+# ---------------
+# feeds/pon_drivers/airoha-pon-frontends/src/airoha-paged-bosa-ux3363.c, function
+# ux3363_apply.  An earlier version of this script was written from a disassembly and
+# got four things wrong; the source settles them:
 #
-#   select page:  two bytes 0x7F, page      (i2c_transfer_buffer_flags, len 2)
-#   read:         write 1 byte reg, then read N bytes, no stop between
-#   write:        two bytes reg, value      (i2c_transfer_buffer_flags, len 2)
+#   WRONG (disassembly)                     RIGHT (source)
+#   data[0x000..0x0B7] -> page 0x80 reg 0x00   -- this range is never read at all
+#   data[0x200] -> page 0x80 reg 0x00, 110 B    data[0x200] -> page 0x80 reg 0x80, 111 B
+#   data[0x3d6] -> page 0x84 reg 0x56           data[0x3d6] -> page 0x84 reg 0xd6
+#   data[0x3e0] -> page 0x84 reg 0x60           data[0x3e0] -> page 0x84 reg 0xe0
+#   every page's first register is 0x00         pages 0x81-0x84 start at 0x80
 #
-# Which offset of the payload goes to which page comes from ux3363_apply.  Every
-# slice's page and register are visible in the instruction pair just before each
-# write_range call:
+# The 0xd6/0xe0 mistakes came from folding 0xffffffd6 sign-extended down to 0x56;
+# the low eight bits are 0xd6.  The 0x000 slice came from misreading the loop as
+# data[value] when it is data[0x200 + value].
 #
-#   115c/1160:  w2 = 0xffffff80, w1 = 0xffffff81   -> page 0x81, reg 0x00
-#   1180/1184:  w2 = 0xffffff80, w1 = 0xffffff82   -> page 0x82, reg 0x00
-#   11a4/11a8:  w2 = 0xffffff80, w1 = 0xffffff83   -> page 0x83, reg 0x00
-#   11c8/11cc:  w2 = 0xffffff80, w1 = 0xffffff84   -> page 0x84, reg 0x00
-#   11ec/11f0:  w2 = 0xffffffd6, w1 = 0xffffff84   -> page 0x84, reg 0x56
-#   1210/1214:  w2 = 0xffffffe0, w1 = 0xffffff84   -> page 0x84, reg 0x60
-#   1234/1238:  w2 = 0x00000000, w1 = 0x00000000   -> page 0x00, reg 0x00
+# The authoritative slice list, all with first=0x80 except page 0x00:
 #
-# So the full map is:
+#   page 0x81, first 0x80, 105 B  <- data + 0x280
+#   page 0x82, first 0x80, 105 B  <- data + 0x300
+#   page 0x83, first 0x80, 105 B  <- data + 0x400
+#   page 0x84, first 0x80,  84 B  <- data + 0x380
+#   page 0x84, first 0xd6,   8 B  <- data + 0x3d6   (0xd4-0xd5 reserved)
+#   page 0x84, first 0xe0,  11 B  <- data + 0x3e0   (0xde-0xdf reserved)
+#   page 0x00, first 0x00, 123 B  <- data + 0x100
+#   page 0x80, regs 0x80..0xee    <- data[0x200 + n] for n in 0..110   (111 B)
 #
-#   payload 0x000..0x0B7  -> page 0x80, regs 0x00..0xB7  (184 bytes)
-#   payload 0x200..0x26D  -> page 0x80, regs 0x00..0x6D  (110 bytes, loop at 0x129c)
-#   payload 0x100..0x17A  -> page 0x00, reg  0x00       (123 bytes)
-#   payload 0x280..0x2E8  -> page 0x81, reg  0x00       (105 bytes)
-#   payload 0x300..0x368  -> page 0x82, reg  0x00       (105 bytes)
-#   payload 0x400..0x468  -> page 0x83, reg  0x00       (105 bytes)
-#   payload 0x380..0x3D3  -> page 0x84, reg  0x00       ( 84 bytes)
-#   payload 0x3D6..0x3DD  -> page 0x84, reg  0x56       (  8 bytes)
-#   payload 0x3E0..0x3EA  -> page 0x84, reg  0x60       ( 11 bytes)
+# data[0x000..0x0ff] and data[0x469..0x77f] are never read.  Length must be exactly
+# 0x780 or ux3363_apply returns -EINVAL on its first line.
 #
-# Page 0x00 is the module's A0h EEPROM (vendor strings).  Note that it is written
-# near the end, after page 0x80 is re-selected at 0x1248.
+# Wire protocol, from airoha-paged-bosa-main.c and the header constants:
 #
-# Total payload must be exactly 0x780 = 1920 bytes, or ux3363_apply returns -EINVAL
-# at its first instruction.
+#   AIROHA_BOSA_PAGE_SELECT  0x7f    two-byte write: 0x7f, page
+#   AIROHA_BOSA_TX_CONTROL   0x6e
+#   AIROHA_BOSA_TX_DISABLE   BIT(6)
+#   read                     write 1 byte reg, then read N bytes, no stop between
+#   write                    two-byte write: reg, value
 #
 # Usage:  sh read-module-eeprom.sh [outdir]
-# Output: $outdir/aponcal-payload.bin   the 1920-byte payload extracted from the module
-#         $outdir/aponcal-volume.bin    the full 262144-byte volume image with header
+# Output: $outdir/aponcal-payload.bin   1920-byte payload
+#         $outdir/aponcal-volume.bin    262144-byte bosa volume with APONCAL header
 #
 # This only READS the module.  It never writes to it and never touches flash.
 
@@ -51,135 +54,58 @@ OUTDIR="${1:-/tmp/pagedump}"
 
 mkdir -p "$OUTDIR" || exit 1
 
-have_i2ctransfer() {
-	command -v i2ctransfer >/dev/null 2>&1
-}
-
-# Fall back to raw i2c transfers through /dev/i2c-N when i2ctransfer is missing.
-# Both paths implement the same three operations.
-if have_i2ctransfer; then
-	MODE=i2ctransfer
-else
-	echo "i2ctransfer not found; trying /dev/i2c-$BUS" >&2
-	if [ ! -e "/dev/i2c-$BUS" ]; then
-		echo "no i2c-tools and no /dev/i2c-$BUS -- cannot read the module" >&2
-		echo "install i2c-tools (opkg install i2c-tools) and re-run" >&2
-		exit 1
-	fi
-	MODE=raw
+if ! command -v i2ctransfer >/dev/null 2>&1; then
+	echo "i2ctransfer not found; install i2c-tools (opkg install i2c-tools)" >&2
+	exit 1
 fi
 
-echo "reading module at i2c-$BUS addr $ADDR using $MODE"
-
-select_page() {
-	if [ "$MODE" = i2ctransfer ]; then
-		i2ctransfer -y "$BUS" "w2@$ADDR" 0x7f "$1" >/dev/null 2>&1
-		return $?
-	fi
-	# raw: 0x7F then the page number
-	printf "\\x7f\\x$(printf %02x "$1")" > /dev/null 2>&1
-	return 1
-}
-
-# Read N bytes starting at register REG into a file.
-read_range() {
-	local reg="$1" len="$2" dest="$3"
-	if [ "$MODE" = i2ctransfer ]; then
-		i2ctransfer -y "$BUS" "w1@$ADDR" "$reg" "r$len" > "$dest" 2>/dev/null
-		return $?
-	fi
-	return 1
-}
+echo "reading module at i2c-$BUS addr $ADDR"
 
 TMP="$OUTDIR/raw"
 mkdir -p "$TMP" || exit 1
 
 fail=0
 
-# --- page 0x80: 184 bytes, one register at a time is what the driver does, but a
-# --- single 184-byte burst reads the same page and is far fewer transactions.
-if select_page 0x80; then
-	if read_range 0x00 184 "$TMP/p80.bin"; then
-		printf '  page 0x80  %s bytes\n' "$(wc -c < "$TMP/p80.bin")"
-	else
-		echo '  page 0x80  read failed' >&2
-		fail=1
-	fi
-else
-	echo '  page 0x80  select failed' >&2
-	fail=1
-fi
+# select_page PAGE
+select_page() {
+	i2ctransfer -y "$BUS" "w2@$ADDR" 0x7f "$1" >/dev/null 2>&1
+}
 
-# --- page 0x81: 105 bytes
-if select_page 0x81; then
-	if read_range 0x00 105 "$TMP/p81.bin"; then
-		printf '  page 0x81  %s bytes\n' "$(wc -c < "$TMP/p81.bin")"
-	else
-		echo '  page 0x81  read failed' >&2
-		fail=1
+# read_from PAGE REG LEN DEST
+# Reads LEN bytes starting at REG, after selecting PAGE.
+read_from() {
+	page="$1"; reg="$2"; len="$3"; dest="$4"
+	if ! select_page "$page"; then
+		echo "  page 0x$page select failed" >&2
+		return 1
 	fi
-else
-	echo '  page 0x81  select failed' >&2
-	fail=1
-fi
+	if ! i2ctransfer -y "$BUS" "w1@$ADDR" "$reg" "r$len" > "$dest" 2>/dev/null; then
+		echo "  page 0x$page reg 0x$reg read failed" >&2
+		return 1
+	fi
+	got=$(wc -c < "$dest")
+	if [ "$got" -ne "$len" ]; then
+		echo "  page 0x$page reg 0x$reg short read: $got of $len" >&2
+		return 1
+	fi
+	printf '  page 0x%s reg 0x%s  %s bytes\n' "$page" "$reg" "$got"
+	return 0
+}
 
-# --- page 0x82: 105 bytes
-if select_page 0x82; then
-	if read_range 0x00 105 "$TMP/p82.bin"; then
-		printf '  page 0x82  %s bytes\n' "$(wc -c < "$TMP/p82.bin")"
-	else
-		echo '  page 0x82  read failed' >&2
-		fail=1
-	fi
-else
-	echo '  page 0x82  select failed' >&2
-	fail=1
-fi
-
-# --- page 0x83: 105 bytes
-if select_page 0x83; then
-	if read_range 0x00 105 "$TMP/p83.bin"; then
-		printf '  page 0x83  %s bytes\n' "$(wc -c < "$TMP/p83.bin")"
-	else
-		echo '  page 0x83  read failed' >&2
-		fail=1
-	fi
-else
-	echo '  page 0x83  select failed' >&2
-	fail=1
-fi
-
-# --- page 0x84: the driver writes three separate slices into it (84 at reg 0x00,
-# --- 8 at reg 0x56, 11 at reg 0x60), so read enough to cover regs 0x00..0x6A.
-if select_page 0x84; then
-	if read_range 0x00 128 "$TMP/p84.bin"; then
-		printf '  page 0x84  %s bytes\n' "$(wc -c < "$TMP/p84.bin")"
-	else
-		echo '  page 0x84  read failed' >&2
-		fail=1
-	fi
-else
-	echo '  page 0x84  select failed' >&2
-	fail=1
-fi
-
-# --- page 0x00: the A0h EEPROM.  ux3363_apply copies 123 bytes of it from payload
-# --- offset 0x100, writing to page 0x00 register 0x00.
-if select_page 0x00; then
-	if read_range 0x00 123 "$TMP/p00.bin"; then
-		printf '  page 0x00  %s bytes\n' "$(wc -c < "$TMP/p00.bin")"
-	else
-		echo '  page 0x00  read failed' >&2
-		fail=1
-	fi
-else
-	echo '  page 0x00  select failed' >&2
-	fail=1
-fi
+# The register file is written from the module's own pages, reading each region at
+# the same page/register the driver writes it to.
+read_from 00 00 123 "$TMP/p00_r00.bin" || fail=1
+read_from 80 80 111 "$TMP/p80_r80.bin" || fail=1
+read_from 81 80 105 "$TMP/p81_r80.bin" || fail=1
+read_from 82 80 105 "$TMP/p82_r80.bin" || fail=1
+read_from 83 80 105 "$TMP/p83_r80.bin" || fail=1
+read_from 84 80  84 "$TMP/p84_r80.bin" || fail=1
+read_from 84 d6   8 "$TMP/p84_rd6.bin" || fail=1
+read_from 84 e0  11 "$TMP/p84_re0.bin" || fail=1
 
 if [ "$fail" -ne 0 ]; then
 	echo
-	echo 'one or more pages could not be read; not assembling a partial payload'
+	echo 'one or more regions could not be read; not assembling a partial payload'
 	exit 1
 fi
 
@@ -198,44 +124,25 @@ payload = bytearray(b'\x00' * PAYLOAD)
 
 
 def load(name, expect):
-    p = tmp / name
-    d = p.read_bytes()
-    if len(d) < expect:
-        raise SystemExit(f'{name}: read {len(d)} bytes, need {expect}')
-    return d[:expect]
+    d = (tmp / name).read_bytes()
+    if len(d) != expect:
+        raise SystemExit(f'{name}: {len(d)} bytes, expected {expect}')
+    return d
 
 
 def place(off, data):
     payload[off:off + len(data)] = data
 
 
-p80 = load('p80.bin', 184)
-p81 = load('p81.bin', 105)
-p82 = load('p82.bin', 105)
-p83 = load('p83.bin', 105)
-p84 = load('p84.bin', 128)
-p00 = load('p00.bin', 123)
-
-# The driver's slicing map.  Every destination is now known:
-#
-#   page 0x80 regs 0x00..0xB7  <- payload 0x000  (184 B)
-#   page 0x80 regs 0x00..0x6D  <- payload 0x200  (110 B, second pass over 0x80)
-#   page 0x00 reg  0x00        <- payload 0x100  (123 B, A0h EEPROM)
-#   page 0x81 reg  0x00        <- payload 0x280  (105 B)
-#   page 0x82 reg  0x00        <- payload 0x300  (105 B)
-#   page 0x83 reg  0x00        <- payload 0x400  (105 B)
-#   page 0x84 reg  0x00        <- payload 0x380  ( 84 B)
-#   page 0x84 reg  0x56        <- payload 0x3D6  (  8 B)
-#   page 0x84 reg  0x60        <- payload 0x3E0  ( 11 B)
-place(0x000, p80)              # page 0x80, first pass
-place(0x100, p00)              # page 0x00, A0h EEPROM mirror
-place(0x200, p80[0x00:0x6E])   # page 0x80 regs 0x00..0x6D, second pass
-place(0x280, p81)              # page 0x81
-place(0x300, p82)              # page 0x82
-place(0x380, p84[0x00:0x54])   # page 0x84, 84 bytes at reg 0x00
-place(0x3D6, p84[0x56:0x5E])   # page 0x84, 8 bytes at reg 0x56
-place(0x3E0, p84[0x60:0x6B])   # page 0x84, 11 bytes at reg 0x60
-place(0x400, p83)              # page 0x83
+# Read exactly the spans the driver writes, from the register it writes them to.
+place(0x100, load('p00_r00.bin', 123))    # page 0x00, first 0x00
+place(0x200, load('p80_r80.bin', 111))    # page 0x80, regs 0x80..0xee
+place(0x280, load('p81_r80.bin', 105))    # page 0x81, first 0x80
+place(0x300, load('p82_r80.bin', 105))    # page 0x82, first 0x80
+place(0x380, load('p84_r80.bin', 84))     # page 0x84, first 0x80
+place(0x3D6, load('p84_rd6.bin', 8))      # page 0x84, first 0xd6
+place(0x3E0, load('p84_re0.bin', 11))     # page 0x84, first 0xe0
+place(0x400, load('p83_r80.bin', 105))    # page 0x83, first 0x80
 
 payload_path = outdir / 'aponcal-payload.bin'
 payload_path.write_bytes(bytes(payload))
@@ -248,7 +155,7 @@ cell = bytearray(HEADER + PAYLOAD)
 cell[0:8] = b'APONCAL\x00'
 struct.pack_into('<H', cell, 0x08, 1)
 struct.pack_into('<H', cell, 0x0a, HEADER)
-struct.pack_into('<I', cell, 0x0c, 0)
+struct.pack_into('<I', cell, 0x0c, 2)          # AIROHA_BOSA_CAL_UX3363
 struct.pack_into('<I', cell, 0x10, 1)
 struct.pack_into('<I', cell, 0x14, PAYLOAD)
 cell[HEADER:HEADER + PAYLOAD] = payload
@@ -259,26 +166,31 @@ volume[CELL_OFFSET:CELL_OFFSET + len(cell)] = cell
 volume_path = outdir / 'aponcal-volume.bin'
 volume_path.write_bytes(bytes(volume))
 
+USED = [
+    (0x100, 0x17A, 'page 0x00 reg 0x00', 123),
+    (0x200, 0x26E, 'page 0x80 reg 0x80', 111),
+    (0x280, 0x2E8, 'page 0x81 reg 0x80', 105),
+    (0x300, 0x368, 'page 0x82 reg 0x80', 105),
+    (0x380, 0x3D3, 'page 0x84 reg 0x80',  84),
+    (0x3D6, 0x3DD, 'page 0x84 reg 0xd6',   8),
+    (0x3E0, 0x3EA, 'page 0x84 reg 0xe0',  11),
+    (0x400, 0x468, 'page 0x83 reg 0x80', 105),
+]
+
 print()
 print(f'payload  {payload_path}  {len(payload)} bytes')
 print(f'volume   {volume_path}  {len(volume)} bytes')
 print()
-print('checks ux3363_apply will make:')
-print(f'  payload length == 0x780 :  {len(payload) == PAYLOAD}')
+print(f'length == 0x780 : {len(payload) == PAYLOAD}')
 print()
-print('slices placed:')
-print(f'  0x000..0x0B7  page 0x80 reg 0x00  {len(p80):>3} bytes  (first pass)')
-print(f'  0x100..0x17A  page 0x00 reg 0x00  {len(p00):>3} bytes  (A0h EEPROM)')
-print(f'  0x200..0x26D  page 0x80 reg 0x00  {len(p80[0x00:0x6E]):>3} bytes  (second pass)')
-print(f'  0x280..0x2E8  page 0x81 reg 0x00  {len(p81):>3} bytes')
-print(f'  0x300..0x368  page 0x82 reg 0x00  {len(p82):>3} bytes')
-print(f'  0x380..0x3D3  page 0x84 reg 0x00  {len(p84[0x00:0x54]):>3} bytes')
-print(f'  0x3D6..0x3DD  page 0x84 reg 0x56  {len(p84[0x56:0x5E]):>3} bytes')
-print(f'  0x3E0..0x3EA  page 0x84 reg 0x60  {len(p84[0x60:0x6B]):>3} bytes')
-print(f'  0x400..0x468  page 0x83 reg 0x00  {len(p83):>3} bytes')
+print('spans the driver reads:')
+for lo, hi, where, n in USED:
+    print(f'  0x{lo:03x}..0x{hi:03x}  {where:<20} {n:>3} bytes')
 print()
-print('every slice has a known destination; nothing is left zero on purpose.')
-print('the region 0x469..0x77F stays zero -- ux3363_apply never reads it.')
+print('  0x000..0x0ff  never read by ux3363_apply')
+print('  0x469..0x77f  never read by ux3363_apply')
+print()
+print(f'calibration_id set to 2 (AIROHA_BOSA_CAL_UX3363)')
 PY
 
 rc=$?
