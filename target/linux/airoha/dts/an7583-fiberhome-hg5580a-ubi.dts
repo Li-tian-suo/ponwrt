@@ -5,10 +5,25 @@
  * Hardware nodes come from an7583-fiberhome-hg5580a-common.dtsi; only the
  * partition table differs from the stock variant.
  *
- * The flash keeps the stock FiberHome 10-partition table and UBI lives entirely
- * inside "apps" (0x5f00000, 104 MiB).  Nothing outside that window is written
- * by U-Boot, which is what keeps "factory" (MAC / PON serial / optical
- * calibration) safe across a bootloader reflash.
+ * The flash is not split the way the vendor firmware splits it.  UBI owns one
+ * contiguous 190.5 MiB window starting at 0x280000 and ending exactly at the
+ * factory partition (0xe700000):
+ *
+ *   0x00000000  0x00280000  bl2       vendor BL2 + FIP, read-only
+ *   0x00280000  0x0be80000  ubi       the only managed region
+ *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
+ *   0x0ec00000  0x00020000  bosacal   BOSA calibration, read-only
+ *   0x0ec20000  0x00020000  identity  vendor identity mirror, read-only
+ *
+ * The previous revision carved UBI out of the stock "apps" window
+ * (0x5f00000 + 0x6800000), which overlapped the stock "apps", "overlay" and
+ * "apps_data" partitions.  Booting the vendor firmware then wrote into our UBI
+ * and corrupted it:
+ *
+ *   ubi0 error: scan_peb: bad image sequence number -730722252 in PEB 1
+ *
+ * With one contiguous window nothing can overlap UBI, so neither the vendor
+ * firmware nor a ubi-rebuild can clobber it.
  *
  * Pairs with the U-Boot in uboot-port/: it boots a FIT from the UBI "fit"
  * volume, and fitblk releases that volume's rootfs as the root block device.

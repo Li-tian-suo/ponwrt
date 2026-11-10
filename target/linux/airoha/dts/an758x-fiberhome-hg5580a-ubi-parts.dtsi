@@ -1,19 +1,45 @@
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
 /*
- * FiberHome HG5580A -- UBI partition layout.
+ * FiberHome HG5580A -- single-UBI partition layout.
  *
- * Replaces the stock 14-partition table.  Real hardware reports 10 partitions
- * and "apps" is 104 MiB; UBI lives entirely inside that window so nothing
- * outside it is ever written by U-Boot.  That keeps "factory" (MAC / PON
- * serial / optical calibration) safe across a bootloader reflash.
+ * Why this replaces the previous 10-partition table
+ * -------------------------------------------------
+ * The earlier layout carved "ubi" out of the stock "apps" window
+ * (0x5f00000 + 0x6800000).  That window fully covers the stock partitions
+ * "apps" (32 MiB), "overlay" (24 MiB) and "apps_data" (48 MiB), so booting the
+ * vendor firmware wrote its overlay and application data straight into our UBI
+ * container.  The result on hardware was:
  *
- * This file must stay in sync with uboot-port/dts/an7583-fiberhome-hg5580a.dts
- * - if the label or size of the UBI partition differs, U-Boot looks for a
- * partition the kernel does not describe (or the reverse).
+ *   ubi0 error: scan_peb: bad image sequence number -730722252 in PEB 1,
+ *               expected 653200639
+ *   ubi0 error: ubi_attach_mtd_dev: failed to attach mtd7, error -22
  *
- * The whole &spi_nand node is written out here rather than patched onto the
- * common file's node, because the common file deliberately keeps only
- * `status = "okay"` and therefore exposes no label to attach to.
+ * and, because the kernel then could not read the "bosa" and "ri" volumes, the
+ * BOSA driver had no calibration to bind to, so pon0 never appeared at all.
+ *
+ * The fix is to stop sharing the flash with the vendor layout.  UBI now owns one
+ * contiguous 190.5 MiB window that no stock partition overlaps.
+ *
+ * Layout
+ * ------
+ *   0x00000000  0x00280000  bl2       vendor BL2 + FIP, read-only
+ *   0x00280000  0x0e480000  ubi       228.5 MiB, the only managed region
+ *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
+ *   0x0ec00000  0x00020000  bosacal   BOSA calibration, read-only
+ *   0x0ec20000  0x00020000  identity  vendor identity mirror, read-only
+ *
+ * "ubi" ends exactly where "factory" begins.  Nothing U-Boot or ubi-rebuild can
+ * touch overlaps the three read-only data partitions, so a UBI rebuild can never
+ * destroy the MAC address, the PON serial or the optical calibration again.
+ *
+ * Note there is no separate bootloader/FIP partition: bl2 is the first 2.5 MiB,
+ * which is the vendor BL2 plus FIP pair.  It is marked read-only because the
+ * vendor FIP carries a signature our build cannot reproduce.
+ *
+ * This file must stay in sync with uboot-port/dts/an7583-fiberhome-hg5580a.dts.
+ * If the label or size of the UBI partition differs, U-Boot looks for a
+ * partition the kernel does not describe (or the reverse), which shows up as
+ * "Cannot find mtd partition \"ubi\"" at boot.
  */
 
 &snfi {
@@ -28,63 +54,58 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
-		/* Whole flash, so a full dump is possible from Linux too. */
+		/* Whole flash, so a complete dump is possible from Linux too. */
 		partition@0_all {
 			label = "all_flash";
 			reg = <0x0 0x10000000>;
 			read-only;
 		};
 
+		/*
+		 * Vendor BL2.  Exactly one 128 KiB eraseblock.
+		 *
+		 * Two independent constraints force this size:
+		 *
+		 *   1. The BL2 UBI boot path in this TF-A port is hardcoded to look
+		 *      for the UBI container at 0x20000:
+		 *          plat/ecnt/en7523/bl2_boot_nand_ubi.c
+		 *          #define UBI_START_ADDR 0x20000
+		 *      so "ubi" must begin immediately after a 128 KiB bl2.
+		 *
+		 *   2. U-Boot's httpd flash-bl2 handler rejects any bl2 partition
+		 *      whose size is not exactly one eraseblock:
+		 *          if (!mtd_is_partition(mtd) || mtd->offset ||
+		 *              mtd->parent->parent || !mtd_uses_pages(mtd) ||
+		 *              mtd->size != mtd->erasesize || mtd->erasesize <= 0x800)
+		 *                  goto out;
+		 *      and it writes the preloader FIP at offset 0x800 inside it.
+		 *
+		 * The earlier 2.5 MiB size satisfied neither.
+		 */
 		partition@0 {
-			label = "bootloader";
-			reg = <0x0 0x280000>;
+			label = "bl2";
+			reg = <0x0 0x20000>;
 			read-only;
-		};
-
-		partition@280000 {
-			label = "bootflag";
-			reg = <0x280000 0x80000>;
-			read-only;
-		};
-
-		partition@300000 {
-			label = "KernelA";
-			reg = <0x300000 0x600000>;
-			read-only;
-		};
-
-		partition@900000 {
-			label = "RootfsA";
-			reg = <0x900000 0x2800000>;
-			read-only;
-		};
-
-		partition@3100000 {
-			label = "KernelB";
-			reg = <0x3100000 0x600000>;
-		};
-
-		partition@3700000 {
-			label = "RootfsB";
-			reg = <0x3700000 0x2800000>;
 		};
 
 		/*
-		 * The only partition U-Boot formats and manages (104 MiB).
-		 * compatible = "linux,ubi" makes the kernel attach the UBI
-		 * device and register the named volumes below.
+		 * The single managed region.  compatible = "linux,ubi" makes the
+		 * kernel attach the UBI device and register the named volumes.
+		 *
+		 * Starts at 0x20000 because that is where BL2 expects UBI
+		 * (UBI_START_ADDR above).  It ends precisely at the factory
+		 * partition: 0x20000 + 0xe6e0000 = 0xe700000.
 		 */
-		partition@5f00000 {
+		partition@20000 {
 			label = "ubi";
-			reg = <0x5f00000 0x6800000>;
+			reg = <0x20000 0xe6e0000>;
 			compatible = "linux,ubi";
 
 			volumes {
 				/*
-				 * UX3363 paged BOSA calibration.  The volume
-				 * keeps its UBI header, so the payload starts
-				 * at 0x2 -- same reasoning as the nokia UBI
-				 * variant.
+				 * UX3363 paged BOSA calibration.  The volume keeps
+				 * its UBI header, so the payload starts at 0x2 --
+				 * same reasoning as the Nokia UBI variant.
 				 *
 				 * Exposed as the provider the BOSA node in the
 				 * common file consumes via
@@ -106,15 +127,15 @@
 				};
 
 				/*
-				 * Board identity.  The recovery image writes
-				 * the same offsets this file describes:
+				 * Board identity, copied out of the vendor factory
+				 * partition at install time.  Offsets match what
+				 * the recovery image writes and what the common
+				 * file's gdm1 / gdm2 / gdm3 nodes consume:
+				 *
 				 *   0x00  6 bytes  base MAC
 				 *   0x06  6 bytes  LAN / 2.5G MAC
-				 *   0x0c  8 bytes  PON serial
+				 *   0x0c  8 bytes  PON serial  (FHTT + 4 bytes)
 				 *   0x14  6 bytes  PON MAC
-				 *
-				 * These four labels are what the common file's
-				 * gdm1 / gdm2 / gdm3 nodes consume.
 				 */
 				ubi-volume-ri {
 					volname = "ri";
@@ -161,23 +182,16 @@
 			};
 		};
 
-		partition@c700000 {
-			label = "frameworka";
-			reg = <0xc700000 0x1000000>;
-			read-only;
-		};
-
-		partition@d700000 {
-			label = "frameworkb";
-			reg = <0xd700000 0x1000000>;
-			read-only;
-		};
-
 		/*
 		 * MAC / PON serial / optical calibration as shipped by the
-		 * vendor.  Never written.  The vendor stores it as a UBI volume
-		 * called "fhdata" holding a UBIFS with table / factory_conf /
-		 * sysinfo_conf / led_gpio_conf.
+		 * vendor.  Outside the UBI window on purpose: this is the one
+		 * thing that cannot be regenerated, and it must survive both a
+		 * bootloader reflash and a UBI rebuild.
+		 *
+		 * The vendor stores it as a UBI volume called "fhdata" holding a
+		 * UBIFS with table / factory_conf / sysinfo_conf / led_gpio_conf.
+		 * Read from the recovery image and copied into the "ri" and
+		 * "bosa" volumes UBI owns.
 		 */
 		partition@e700000 {
 			label = "factory";
@@ -190,6 +204,18 @@
 					volname = "fhdata";
 				};
 			};
+		};
+
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x20000>;
+			read-only;
+		};
+
+		partition@ec20000 {
+			label = "identity";
+			reg = <0xec20000 0x20000>;
+			read-only;
 		};
 	};
 };
@@ -207,7 +233,7 @@
 };
 
 /*
- * Root specification for the UBI layout.
+ * Root specification.
  *
  * There is no mtd rootfs and no overlay partition.  U-Boot boots the FIT from
  * the UBI "fit" volume and fitblk releases the rootfs inside it as a block

@@ -14,23 +14,29 @@
  *
  * Partition layout
  * ----------------
- * The flash keeps the stock FiberHome layout.  Only the "apps" partition is
- * handed to UBI, so the vendor bootloader, the A/B system slots and -- most
- * importantly -- the "factory" partition (MAC addresses, PON serial, optical
- * calibration) are never touched by a U-Boot reflash.
+ * One UBI container plus the vendor data blobs.  This deliberately abandons the
+ * stock 14-partition table.
  *
- *   0x00000000  0x00280000  bootloader      vendor BL2 + FIP
- *   0x00280000  0x00080000  bootflag        vendor A/B selector
- *   0x00300000  0x00600000  KernelA
- *   0x00900000  0x02800000  RootfsA
- *   0x03100000  0x00600000  KernelB
- *   0x03700000  0x02800000  RootfsB
- *   0x05f00000  0x06800000  apps        -> UBI (104 MiB)
- *   0x0c700000  0x01000000  frameworka
- *   0x0d700000  0x01000000  frameworkb
- *   0x0e700000  0x00500000  factory     -> never written
+ *   0x00000000  0x00280000  bl2       vendor BL2 + FIP, read-only
+ *   0x00280000  0x0be80000  ubi       190.5 MiB, the only managed region
+ *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
+ *   0x0ec00000  0x00020000  bosacal   BOSA calibration, read-only
+ *   0x0ec20000  0x00020000  identity  vendor identity mirror, read-only
  *
- * UBI volumes live inside "apps": fip, fit, rootfs_data, bosa, ri.
+ * Why not keep carving UBI out of the stock "apps" window
+ * ------------------------------------------------------
+ * The previous layout put ubi at 0x5f00000 + 0x6800000, which fully covers the
+ * stock "apps" (32 MiB), "overlay" (24 MiB) and "apps_data" (48 MiB).  Booting
+ * the vendor firmware therefore wrote its overlay and app data into our UBI and
+ * corrupted it:
+ *
+ *   ubi0 error: scan_peb: bad image sequence number -730722252 in PEB 1
+ *   ubi0 error: ubi_attach_mtd_dev: failed to attach mtd7, error -22
+ *
+ * With one contiguous window that ends exactly at "factory", no stock partition
+ * overlaps UBI, so neither the vendor firmware nor a ubi-rebuild can clobber it.
+ *
+ * UBI volumes: fip, fit, ubootenv, ubootenv2, bosa, ri.
  */
 /dts-v1/;
 
@@ -112,8 +118,8 @@
 };
 
 /*
- * SPI-NAND.  The layout mirrors the stock one so nothing outside "apps" is
- * ever written; U-Boot only ever formats the "apps" partition as UBI.
+ * SPI-NAND.  One UBI container that stops at the factory partition, so nothing
+ * U-Boot or ubi-rebuild touches can overlap the read-only vendor data.
  */
 &snfi {
 	status = "okay";
@@ -125,62 +131,48 @@
 		#address-cells = <1>;
 		#size-cells = <1>;
 
+		/*
+		 * Vendor BL2.  Exactly one 128 KiB eraseblock, because both the
+		 * TF-A UBI loader and U-Boot's flash-bl2 handler require it:
+		 *
+		 *   plat/ecnt/en7523/bl2_boot_nand_ubi.c: UBI_START_ADDR 0x20000
+		 *   httpd.c run_bootloader_update(true):
+		 *       mtd->size != mtd->erasesize -> reject
+		 *       preloader FIP goes at offset 0x800 inside the block
+		 */
 		partition@0 {
-			label = "bootloader";
-			reg = <0x0 0x280000>;
+			label = "bl2";
+			reg = <0x0 0x20000>;
 			read-only;
 		};
 
-		partition@280000 {
-			label = "bootflag";
-			reg = <0x280000 0x80000>;
-			read-only;
-		};
-
-		partition@300000 {
-			label = "KernelA";
-			reg = <0x300000 0x600000>;
-			read-only;
-		};
-
-		partition@900000 {
-			label = "RootfsA";
-			reg = <0x900000 0x2800000>;
-			read-only;
-		};
-
-		partition@3100000 {
-			label = "KernelB";
-			reg = <0x3100000 0x600000>;
-		};
-
-		partition@3700000 {
-			label = "RootfsB";
-			reg = <0x3700000 0x2800000>;
-		};
-
-		/* The only partition U-Boot formats and manages. */
-		partition@5f00000 {
+		/*
+		 * The only partition U-Boot formats and manages.
+		 *
+		 * Starts at 0x20000 to match BL2's UBI_START_ADDR, and ends exactly
+		 * at the factory offset: 0x20000 + 0xe6e0000 = 0xe700000.
+		 */
+		partition@20000 {
 			label = "ubi";
-			reg = <0x5f00000 0x6800000>;
-		};
-
-		partition@c700000 {
-			label = "frameworka";
-			reg = <0xc700000 0x1000000>;
-			read-only;
-		};
-
-		partition@d700000 {
-			label = "frameworkb";
-			reg = <0xd700000 0x1000000>;
-			read-only;
+			reg = <0x20000 0xe6e0000>;
 		};
 
 		/* MAC / PON serial / optical calibration.  Never written. */
 		partition@e700000 {
 			label = "factory";
 			reg = <0xe700000 0x500000>;
+			read-only;
+		};
+
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x20000>;
+			read-only;
+		};
+
+		partition@ec20000 {
+			label = "identity";
+			reg = <0xec20000 0x20000>;
 			read-only;
 		};
 	};

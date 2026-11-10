@@ -6,8 +6,8 @@
  *
  *   an758x-fiberhome-hg5580a-stock-parts.dtsi   stock 14 partitions,
  *                                               JFFS2/JFFS2-on-overlay
- *   an758x-fiberhome-hg5580a-ubi-parts.dtsi     10 partitions, UBI inside
- *                                               "apps", fitblk rootfs
+ *   an758x-fiberhome-hg5580a-ubi-parts.dtsi     bl2 + one 190.5 MiB UBI window
+ *                                               ending at "factory", fitblk rootfs
  */
 
 // SPDX-License-Identifier: GPL-2.0-only OR MIT
