@@ -52,29 +52,73 @@
 
 . /lib/functions.sh
 
-IDENTITY_DEV=/dev/mtd13
 IDENTITY_MTD=identity
 FACTORY_DIR=/factory
 TMPMNT=/tmp/.identity-factory
 
 log() { echo "hg5580a-identity: $*"; }
 
+# MTD index of a partition by name.  Never hard-code the mtdN number: it follows
+# /proc/mtd order, and this port moved from the vendor's fourteen partitions to six:
+#
+#   mtd0 all_flash   mtd1 bl2   mtd2 ubi   mtd3 factory   mtd4 bosacal   mtd5 identity
+#
+# An earlier revision used IDENTITY_DEV=/dev/mtd13, which was the identity index in
+# the vendor layout.  Under the single-UBI layout that node does not exist, so the
+# dd that seeds and verifies the partition read nothing and the script did nothing.
+mtd_index() {
+    awk -v n="$1" '
+        {
+            i = index($0, ":")
+            if (i == 0)
+                next
+            idx = substr($0, 4, i - 4)
+            if ($0 ~ ("\"" n "\""))
+                print idx
+        }' /proc/mtd | head -n 1
+}
+
 # ---------------------------------------------------------------- read factory
 
-# The factory volume is ubifs; mount it read-only if it is not already mounted.
+# The vendor data lives in the "factory" MTD partition, which is its own UBI container
+# (ubi1) holding one UBIFS volume named "fhdata":
+#
+#   ubi1: attached mtd3 (name "factory", size 5 MiB)
+#   ubi1: user volume: 1
+#     Volume 0: fhdata  (3.8 MiB, dynamic)
+#
+# An earlier revision tried ubi0_0 and ubi0:rootfs.  Both are wrong here: ubi0 is the
+# main container whose volume 0 is "fip", and no volume is called "rootfs".  That is
+# why the boot log showed
+#
+#   hg5580a-identity: ERROR: cannot mount the factory volume
+#
+# while ubinfo showed the volume present and healthy.  Try the real names and log
+# which one worked, so a future layout change stays visible instead of silent.
 mount_factory() {
-    [ -d "$FACTORY_DIR" ] && [ -f "$FACTORY_DIR/factory_conf" ] && return 0
+    [ -f "$FACTORY_DIR/factory_conf" ] && return 0
 
-    # ubi0 attaches read-only (write-protected) so mount ro.
     mkdir -p "$TMPMNT"
-    if mount -t ubifs -o ro ubi0_0 "$TMPMNT" 2>/dev/null; then
-        FACTORY_DIR="$TMPMNT"
-        return 0
+
+    # Attach the factory container if the kernel has not done so yet.
+    if [ ! -d /sys/class/ubi/ubi1 ]; then
+        idx=$(mtd_index factory)
+        [ -n "$idx" ] && ubiattach -m "$idx" >/dev/null 2>&1
     fi
-    if mount -t ubifs -o ro ubi0:rootfs "$TMPMNT" 2>/dev/null; then
-        FACTORY_DIR="$TMPMNT"
-        return 0
-    fi
+
+    for spec in ubi1:fhdata ubi1_0 ubi0:fhdata; do
+        if mount -t ubifs -o ro "$spec" "$TMPMNT" 2>/dev/null; then
+            if [ -f "$TMPMNT/factory_conf" ]; then
+                FACTORY_DIR="$TMPMNT"
+                log "factory mounted from $spec"
+                return 0
+            fi
+            umount "$TMPMNT" 2>/dev/null
+        fi
+    done
+
+    [ -f "$FACTORY_DIR/factory_conf" ] && return 0
+
     return 1
 }
 
@@ -126,19 +170,48 @@ serial_to_raw() {
 
 # ------------------------------------------------------------------- main logic
 
+# This file is sourced by /etc/preinit, not executed as a program:
+#
+#     for pi_source_file in /lib/preinit/*; do . $pi_source_file; done
+#
+# so `exit` does not just leave this script -- it terminates the whole preinit process.
+# Every early-out below must therefore be `return`, otherwise the files that sort after
+# this one never get sourced at all:
+#
+#   79_hg5580a_overlay   mounts the UBIFS overlay
+#   80_mount_root        registers do_mount_root
+#   82_config_generate   writes /etc/config/network and /etc/config/system
+#
+# That is exactly what happened on the device: the trace showed only 00, 02, 02, 04 and
+# 05 being sourced, and the resulting system had no overlay, no board.json and no
+# /etc/config/network, while dmesg still reported "- preinit -" followed 0.3 s later by
+# "procd: - early -".
+hg5580a_identity_run() {
+
 log "checking whether identity needs to be populated"
+
+# Resolve the device node at run time.  A hard-coded /dev/mtd13 belongs to the vendor's
+# fourteen-partition layout; here identity is mtd5, and using the wrong node makes both
+# the blank check and the verify below read nothing at all.
+IDENTITY_IDX=$(mtd_index "$IDENTITY_MTD")
+if [ -z "$IDENTITY_IDX" ]; then
+    log "ERROR: no \"$IDENTITY_MTD\" partition in /proc/mtd"
+    return 0
+fi
+IDENTITY_DEV="/dev/mtd$IDENTITY_IDX"
+log "identity partition is mtd$IDENTITY_IDX"
 
 CUR=$(dd if="$IDENTITY_DEV" bs=1 count=6 2>/dev/null | hexdump -v -e '6/1 "%02x"')
 if [ -n "$CUR" ] && [ "$CUR" != "ffffffffffff" ]; then
     log "identity already holds base MAC $CUR, nothing to do"
-    exit 0
+    return 0
 fi
 
 log "identity is blank; reading vendor data"
 
 if ! mount_factory; then
     log "ERROR: cannot mount the factory volume; leaving identity untouched"
-    exit 0
+    return 0
 fi
 log "factory mounted at $FACTORY_DIR"
 
@@ -152,13 +225,13 @@ log "brmac=$RMAC eth1mac=$LMAC ponmac=$PMAC SerialNumber=$SER"
 for v in "$RMAC" "$LMAC" "$PMAC"; do
     if [ -z "$v" ]; then
         log "ERROR: missing MAC in factory_conf; not writing identity"
-        exit 0
+        return 0
     fi
 done
 
-BASERAW=$(mac_to_raw "$RMAC") || { log "ERROR: brmac not parseable"; exit 0; }
-LANRAW=$(mac_to_raw "$LMAC") || { log "ERROR: eth1mac not parseable"; exit 0; }
-PONRAW=$(mac_to_raw "$PMAC") || { log "ERROR: ponmac not parseable"; exit 0; }
+BASERAW=$(mac_to_raw "$RMAC") || { log "ERROR: brmac not parseable"; return 0; }
+LANRAW=$(mac_to_raw "$LMAC") || { log "ERROR: eth1mac not parseable"; return 0; }
+PONRAW=$(mac_to_raw "$PMAC") || { log "ERROR: ponmac not parseable"; return 0; }
 
 if [ -n "$SER" ]; then
     SERRAW=$(serial_to_raw "$SER") || SERRAW=""
@@ -189,8 +262,13 @@ log "identity now: $VERIFY"
 
 if [ "$VERIFY" = "ffffffffffffffffffffffffffffffffffffffffffffffffffff" ]; then
     log "ERROR: write did not take effect"
-    exit 1
+    return 1
 fi
 
 log "done; reboot for the kernel to pick up the new MACs"
-exit 0
+return 0
+
+}
+
+hg5580a_identity_run
+

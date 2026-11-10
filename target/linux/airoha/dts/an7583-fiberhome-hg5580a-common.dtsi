@@ -401,6 +401,44 @@
 	status = "okay";
 	openwrt,netdev-name = "lan1";
 	phy-handle = <&yt8821>;
+
+	/*
+	 * phy-mode 必须是 2500base-x，不能改成 2500base-t。
+	 *
+	 * 这里的 phy-mode 描述的是 MAC <-> PHY 之间的接口，不是网线上的介质。
+	 * Airoha 的 MAC 只实现了有限的几种接口模式，见
+	 * drivers/net/ethernet/airoha/airoha_eth.c 里注册的 phylink 支持列表：
+	 *
+	 *     PHY_INTERFACE_MODE_INTERNAL
+	 *     PHY_INTERFACE_MODE_SGMII
+	 *     PHY_INTERFACE_MODE_1000BASEX
+	 *     PHY_INTERFACE_MODE_2500BASEX      <- 只有这个
+	 *     PHY_INTERFACE_MODE_10GBASER
+	 *     PHY_INTERFACE_MODE_USXGMII
+	 *
+	 * 里面没有 PHY_INTERFACE_MODE_2500BASET。写成 2500base-t 会让 phylink
+	 * 在 phylink_validate() 阶段直接拒绝该接口模式，lan1 根本不会起来。
+	 *
+	 * 另外这片树里所有 an758x 板子（5380A、5382A、Nokia、H3C、Gemtek、
+	 * Unionman、EVB）无一例外都用 2500base-x，也是同一个原因。
+	 *
+	 * YT8821 的线侧仍然是铜口 2.5GBASE-T：驱动在
+	 * yt8821_config_init() 里按 phydev->interface 分支，2500BASEX 时只配置
+	 * SerDes 侧，铜口那一侧照常自动协商。所以插普通网线是能协商的。
+	 *
+	 * 实测记录（2026-11-11，lan1 插 2.5G 电口）：
+	 *   Supported link modes:        2500baseX/Full, 2500baseT/Full
+	 *   Advertised auto-negotiation: No
+	 *   Auto-negotiation:            off
+	 *   Duplex:                      Half
+	 *   Link detected:               no
+	 * PHY 识别正常（phy_id 0x4f51ea19，driver "YT8821 2.5Gbps PHY"），
+	 * MDIO 正常（mdio-bus@c8-mii:07 存在），GPIO 也正常：
+	 *   gpio-28 (an8811_reset)  out hi ACTIVE LOW   => 复位已释放
+	 *   gpio-15 (tx-disable)    out hi              => 发送已使能
+	 * 所以链路起不来不是 PHY/GPIO/MDIO 的问题，需要从 SerDes 与对端
+	 * 是否都工作在 2.5G 固定速率这个方向继续查。
+	 */
 	phy-mode = "2500base-x";
 
 	nvmem-cells = <&fh_lan_mac>;

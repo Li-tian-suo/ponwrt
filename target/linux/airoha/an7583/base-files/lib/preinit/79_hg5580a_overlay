@@ -1,0 +1,111 @@
+#!/bin/sh
+# Give fstools a writable /tmp so mount_root will mount the UBIFS overlay.
+#
+# The problem, established by reading fstools 2026.07.25 mount_root.c:
+#
+#     static int start(int argc, char *argv[3])
+#     {
+#             char *dataname = "rootfs_data";
+#             ...
+#             data = volume_find(dataname);          /* line 45: finds ubi0_6 fine */
+#
+#             if (!getenv("PREINIT") && stat("/tmp/.preinit", &s))
+#                     return -1;                     /* line 47: bails out here */
+#
+#             ...
+#             switch (volume_identify(data)) {
+#             case FS_UBIFS:
+#                     mount_overlay(data);           /* never reached */
+#
+# The rootfs_data volume is present and healthy the whole time:
+#
+#     Volume ID:   6 (on ubi0)
+#     Type:        dynamic
+#     Size:        1514 LEBs (192241664 bytes, 183.3 MiB)
+#     Name:        rootfs_data
+#
+# but /tmp is an empty directory inside the read-only squashfs during preinit, so the
+# sentinel creat() fails and PREINIT never gets set.  mount_root returns -1, the system
+# keeps running on squashfs, and the symptoms are:
+#
+#     touch /etc/config/zzz  -> Read-only file system
+#     uci show network       -> Entry not found
+#     hostname               -> (none)
+#     /tmp/sysinfo           -> missing, so preinit_main never completed
+#     LuCI                   -> unreachable
+#
+# Verified by hand on the device before writing this:
+#
+#     # mount -t tmpfs tmpfs /tmp; : > /tmp/.preinit; PREINIT=1 /sbin/mount_root start
+#     UBIFS (ubi0:6): mounted UBI device 0, volume 6, name "rootfs_data"
+#     UBIFS (ubi0:6): FS size: 190717952 bytes (181 MiB, 1502 LEBs)
+#     mount_root: switching to ubifs overlay
+#
+#     # grep ' /overlay ' /proc/mounts
+#     /dev/ubi0_6 /overlay ubifs rw,noatime,assert=read-only,ubi=0,vol=6
+#     # grep ' / overlay ' /proc/mounts
+#     overlayfs:/overlay / overlay rw,noatime,lowerdir=/,upperdir=/overlay/upper,...
+#     # touch /etc/config/zzz && echo WRITE_OK
+#     WRITE_OK
+#
+# Two notes on why this file does its work at source time rather than via boot_hook_add:
+#
+#   * boot_hook_add relies on `export -n "$hook=..."`, which in this busybox build
+#     clears the variable instead of assigning it, so every hook registered that way is
+#     silently dropped -- including OpenWrt's own do_mount_root from 80_mount_root.
+#
+#   * this filename sorts before 80_mount_root, and /etc/preinit sources the directory
+#     in order, so running here happens at exactly the right moment.
+#
+# /dev matters as much as /tmp: ubiattach talks to /dev/ubi_ctrl and the kernel log
+# handle /dev/kmsg only exists once devtmpfs is mounted.
+#
+# The legacy layouts had a standalone "overlay" MTD partition; this image uses the
+# single-UBI layout where the writable volume is called rootfs_data, which fstools finds
+# by name.  No partition lookup is needed.
+
+hg5580a_overlay_mounted() {
+	grep -qs ' /overlay ' /proc/mounts
+}
+
+hg5580a_preinit_overlay() {
+	# a. a usable /dev
+	if ! grep -qs ' /dev ' /proc/mounts; then
+		mkdir -p /dev
+		mount -t devtmpfs -o mode=0755,nosuid devtmpfs /dev 2>/dev/null
+		[ -c /dev/console ] || mknod /dev/console c 5 1 2>/dev/null
+		[ -c /dev/null ]    || mknod /dev/null    c 1 3 2>/dev/null
+	fi
+
+	# b. a writable /tmp, which is what the sentinel needs
+	if ! grep -qs ' /tmp ' /proc/mounts; then
+		mkdir -p /tmp
+		mount -t tmpfs -o mode=1777,noatime,nosuid,nodev tmpfs /tmp 2>/dev/null
+	fi
+
+	# c. satisfy both halves of the mount_root guard
+	[ -d /tmp ] && : > /tmp/.preinit 2>/dev/null
+	PREINIT=1
+	export PREINIT
+
+	# d. let fstools do the mount and the pivot.  Guarded so a boot that already
+	#    reached this through another path does not mount twice.
+	if ! hg5580a_overlay_mounted; then
+		PREINIT=1 /sbin/mount_root start >/dev/null 2>&1
+	fi
+
+	# e. record the outcome where a serial-only console can show it
+	if [ -w /dev/kmsg ]; then
+		if hg5580a_overlay_mounted; then
+			if grep -qs ' / overlay ' /proc/mounts; then
+				printf 'hg5580a-preinit: root pivoted onto UBIFS overlay\n' > /dev/kmsg
+			else
+				printf 'hg5580a-preinit: /overlay mounted (root not pivoted)\n' > /dev/kmsg
+			fi
+		else
+			printf 'hg5580a-preinit: overlay unavailable, staying on squashfs\n' > /dev/kmsg
+		fi
+	fi
+}
+
+hg5580a_preinit_overlay
