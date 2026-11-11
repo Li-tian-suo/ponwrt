@@ -166,18 +166,16 @@
 		 * 会得到乱码。
 		 *
 		 * 保持 read-only：这是整机唯一一份身份数据。
+		 *
+		 * 不声明 compatible = "linux,ubi"：声明后内核会自动 attach，
+		 * 分区为空时就在只读分区上反复尝试初始化，刷 80 行
+		 * "ubi_io_sync_erase: read-only mode"。需要挂载时由
+		 * lib/preinit/05_hg5580a_identity 自己 ubiattach。
 		 */
 		partition@e700000 {
 			label = "factory";
 			reg = <0xe700000 0x500000>;
 			read-only;
-			compatible = "linux,ubi";
-
-			volumes {
-				ubi_fhdata: ubi-volume-fhdata {
-					volname = "fhdata";
-				};
-			};
 		};
 
 		/*

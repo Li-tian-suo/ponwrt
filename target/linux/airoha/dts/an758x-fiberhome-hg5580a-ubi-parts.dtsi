@@ -197,18 +197,28 @@
 		 * UBIFS with table / factory_conf / sysinfo_conf / led_gpio_conf.
 		 * Read from the recovery image and copied into the "ri" and
 		 * "bosa" volumes UBI owns.
+		 *
+		 * 这里刻意**不**声明 compatible = "linux,ubi"
+		 * ------------------------------------------------
+		 * 声明成 UBI 会让内核在启动时自动 attach。若分区是空的（全 FF，
+		 * 例如刷完固件后 factory 被清掉的机器），UBI 会认为需要初始化，
+		 * 于是往只读分区上写 layout volume，然后无限失败：
+		 *
+		 *     ubi1: MTD device 3 is write-protected, attach in read-only mode
+		 *     ubi1: empty MTD device detected
+		 *     ubi1 error: ubi_io_sync_erase: read-only mode   (实测 80 行)
+		 *
+		 * 而 factory 里有数据时也不需要内核自动 attach：
+		 * lib/preinit/05_hg5580a_identity 的 mount_factory() 自己会
+		 * 按需 ubiattach -m <idx>，再 mount -t ubifs ubi1:fhdata。
+		 * 原来的 ubi_fhdata 标签全仓库没有任何消费者，删掉无副作用。
+		 *
+		 * 保留 read-only：这是整机唯一一份身份数据，禁止误写。
 		 */
 		partition@e700000 {
 			label = "factory";
 			reg = <0xe700000 0x500000>;
 			read-only;
-			compatible = "linux,ubi";
-
-			volumes {
-				ubi_fhdata: ubi-volume-fhdata {
-					volname = "fhdata";
-				};
-			};
 		};
 
 		/*
