@@ -322,6 +322,17 @@
 		fiberhome,ben-active-high;
 		tx-disable-gpios = <&an7583_pinctrl 15 GPIO_ACTIVE_HIGH>;
 
+		/*
+		 * 本机的校准表是 FiberHome 自家容器（"fiberhomebdbob"），
+		 * 不是 Airoha 的 "APONCAL"。驱动默认两种都不接受，
+		 * 只有显式声明这个属性才走 BDBOB 解析路径
+		 * （board/airoha-paged-bosa-bdbob-calibration.patch）。
+		 *
+		 * 只在本机型设置：其他用 UX3363/GN28L95 的机型继续走严格
+		 * 的 APONCAL 校验，行为完全不变。
+		 */
+		fiberhome,bdbob-calibration;
+
 		nvmem-cells = <&bosa_calibration>;
 		nvmem-cell-names = "calibration";
 		status = "okay";

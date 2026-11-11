@@ -1,0 +1,93 @@
+--- a/airoha-pon-frontends/src/airoha-paged-bosa-main.c
++++ b/airoha-pon-frontends/src/airoha-paged-bosa-main.c
+@@ -105,6 +105,79 @@
+ /* The 128-byte container header precedes the native payload. Separate
+  * CRC-32 checks gate register writes on both header and payload integrity.
+  */
++/*
++ * FiberHome ships its own container for the same 1920-byte register image:
++ *
++ *	0x00	char[16]	"fiberhomebdbob"
++ *	0x10	char[16]	build string, e.g. "202404291559VB"
++ *	0x70	u32		payload length (0x780)
++ *	0x74	u32		unknown
++ *	0x78	u32		header length (0x80)
++ *	0x7c	u32		unknown
++ *	0x80	...		payload
++ *
++ * It carries no magic equivalent to "APONCAL" and no checksums, so accepting it
++ * is opt-in: only boards that set "fiberhome,bdbob-calibration" in the optical
++ * frontend node take this path.  Every other user of this driver keeps the
++ * strict APONCAL validation, which is why this cannot silently widen what the
++ * driver accepts.
++ */
++#define AIROHA_BOSA_BDBOB_MAGIC		"fiberhomebdbob"
++#define AIROHA_BOSA_BDBOB_PAYLOAD_OFS	0x70
++#define AIROHA_BOSA_BDBOB_HEADER_OFS	0x78
++#define AIROHA_BOSA_BDBOB_MODEL_SCAN	0x100
++
++static const struct {
++	const char *name;
++	u32 id;
++} airoha_bosa_bdbob_models[] = {
++	{ "ux3363", AIROHA_BOSA_CAL_UX3363 },
++	{ "gn28l95", AIROHA_BOSA_CAL_GN28L95 },
++};
++
++static int bosa_load_bdbob_calibration(struct airoha_paged_bosa *bosa,
++				      u8 *data, size_t cell_size)
++{
++	struct device *dev = &bosa->client->dev;
++	u32 payload_length, header_length, id = 0;
++	size_t i, j;
++
++	if (cell_size < 0x100 ||
++	    memcmp(data, AIROHA_BOSA_BDBOB_MAGIC,
++		   sizeof(AIROHA_BOSA_BDBOB_MAGIC) - 1))
++		return -EINVAL;
++
++	payload_length = get_unaligned_le32(data + AIROHA_BOSA_BDBOB_PAYLOAD_OFS);
++	header_length = get_unaligned_le32(data + AIROHA_BOSA_BDBOB_HEADER_OFS);
++
++	if (header_length != AIROHA_BOSA_CAL_HEADER_SIZE ||
++	    !payload_length ||
++	    payload_length > cell_size - header_length)
++		return -EINVAL;
++
++	/* The model string sits in the header; use it as calibration_id. */
++	for (i = 0, j = 0; i < AIROHA_BOSA_BDBOB_MODEL_SCAN &&
++			   i + 6 <= cell_size; i++) {
++		for (j = 0; j < ARRAY_SIZE(airoha_bosa_bdbob_models); j++) {
++			if (!memcmp(data + i, airoha_bosa_bdbob_models[j].name, 6)) {
++				id = airoha_bosa_bdbob_models[j].id;
++				goto found;
++			}
++		}
++	}
++	return -ENODEV;
++
++found:
++	bosa->calibration = devm_kmemdup(dev, data + header_length,
++					 payload_length, GFP_KERNEL);
++	if (!bosa->calibration)
++		return -ENOMEM;
++
++	bosa->calibration_id = id;
++	bosa->calibration_length = payload_length;
++	return 0;
++}
++
+ static int bosa_load_calibration(struct airoha_paged_bosa *bosa)
+ {
+ 	struct device *dev = &bosa->client->dev;
+@@ -121,6 +194,10 @@
+ 	data = nvmem_cell_read(cell, &cell_size);
+ 	if (IS_ERR(data))
+ 		return PTR_ERR(data);
++	if (device_property_read_bool(dev, "fiberhome,bdbob-calibration") &&
++	    !bosa_load_bdbob_calibration(bosa, data, cell_size))
++		goto out;	/* ret is still 0 */
++
+ 	if (cell_size < AIROHA_BOSA_CAL_HEADER_SIZE ||
+ 	    memcmp(data, AIROHA_BOSA_CAL_MAGIC, 8)) {
+ 		ret = -EINVAL;

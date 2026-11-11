@@ -25,12 +25,12 @@
  *   0x00000000  0x00020000  bl2       128 KiB, writable
  *   0x00020000  0x0e6e0000  ubi       242 MiB, the only managed region
  *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
- *   0x0ec00000  0x00020000  bosacal   BOSA calibration, read-only
- *   0x0ec20000  0x00020000  identity  vendor identity mirror, read-only
+ *   0x0ec00000  0x00040000  bosacal   BOSA calibration, nvmem calibration@0
+ *   0x0ec40000  0x00040000  identity  vendor identity mirror, nvmem cells
  *
  * "ubi" ends exactly where "factory" begins.  Nothing U-Boot or ubi-rebuild can
- * touch overlaps the three read-only data partitions, so a UBI rebuild can never
- * destroy the MAC address, the PON serial or the optical calibration again.
+ * touch overlaps the two data partitions below the UBI window, so a UBI rebuild
+ * can never destroy the MAC address, the PON serial or the optical calibration.
  *
  * bl2 differs between the two device trees, on purpose
  * ----------------------------------------------------
@@ -124,28 +124,12 @@
 
 			volumes {
 				/*
-				 * UX3363 paged BOSA calibration.  The volume keeps
-				 * its UBI header, so the payload starts at 0x2 --
-				 * same reasoning as the Nokia UBI variant.
-				 *
-				 * Exposed as the provider the BOSA node in the
-				 * common file consumes via
-				 * nvmem-cells = <&bosa_calibration>.
+				 * BOSA calibration is NOT a UBI volume here.  It
+				 * lives in the dedicated "bosacal" MTD partition
+				 * declared below, matching the upstream board file
+				 * target/linux/airoha/dts/an7583-fiberhome-hg5580a.dts
+				 * (partition@ec00000 -> calibration@0).
 				 */
-				ubi-volume-bosa {
-					volname = "bosa";
-
-					nvmem-layout {
-						compatible = "fixed-layout";
-
-						#address-cells = <1>;
-						#size-cells = <1>;
-
-						bosa_calibration: calibration@2 {
-							reg = <0x2 0x800>;
-						};
-					};
-				};
 
 				/*
 				 * Board identity, copied out of the vendor factory
@@ -227,16 +211,66 @@
 			};
 		};
 
+		/*
+		 * BOSA 校准表（FiberHome BDBOB 容器，2048 字节）。
+		 *
+		 * 与上游 target/linux/airoha/dts/an7583-fiberhome-hg5580a.dts
+		 * 的 partition@ec00000 保持一致：校准从这块 MTD 分区偏移 0 读。
+		 *
+		 * 大小 256 KiB，与板级数据页面显示的一致（board/04_pon_data_hg5580a
+		 * 里也写 262144，两边必须对齐，否则页面会按错的大小读写）。
+		 *
+		 * 地址说明：本板 flash 到 0x10000000 结束。factory 到 0xEC00000，
+		 * 之后是：
+		 *     0xEC00000 + 0x40000  bosacal
+		 *     0xEC40000 + 0x40000  identity
+		 *     0xEC80000 ... 剩余空闲
+		 *
+		 * 注意：本机该分区目前只有残留的 UBI 头，需要把
+		 * factory/fhdata 里的 table 文件（2048 字节，BDBOB 格式，
+		 * crc32 = f1315e00）原样写进来，否则读到的是无效数据。
+		 * 驱动 bosa_load_calibration() 只认 APONCAL 魔数，所以即便写入
+		 * BDBOB 仍会报 calibration invalid —— 上游当前也是这个状态。
+		 */
 		partition@ec00000 {
 			label = "bosacal";
-			reg = <0xec00000 0x20000>;
-			read-only;
+			reg = <0xec00000 0x40000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			bosa_calibration: calibration@0 {
+				reg = <0x0 0x800>;
+			};
 		};
 
-		partition@ec20000 {
+		partition@ec40000 {
 			label = "identity";
-			reg = <0xec20000 0x20000>;
-			read-only;
+			reg = <0xec40000 0x40000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/*
+			 * 与上游一致的偏移。本机该分区目前是空的，MAC/SN 仍由
+			 * ubi-volume-ri（factory/fhdata 的 factory_conf）提供，
+			 * 所以这里只声明布局，不改变现有的取值来源。
+			 */
+			identity_base_mac: mac-address@0 {
+				reg = <0x0 0x6>;
+			};
+
+			identity_lan_mac: mac-address@6 {
+				reg = <0x6 0x6>;
+			};
+
+			identity_pon_serial: pon-serial@c {
+				reg = <0xc 0x8>;
+			};
+
+			identity_pon_mac: mac-address@14 {
+				reg = <0x14 0x6>;
+			};
 		};
 	};
 };
