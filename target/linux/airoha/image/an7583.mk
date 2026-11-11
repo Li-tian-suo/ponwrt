@@ -268,8 +268,42 @@ define Device/fiberhome_hg5580a-ubi
 	# 四个视图 + airoha-pon-data 后端），数据来源就是 airoha-ponctl。
 	# 不加这个包，LuCI 里没有 PON 菜单，/usr/lib/lua/luci/controller/
 	# 会是空的，只能用串口敲 ponctl。
+	#
+	# kmod-nf-conntrack-bridge 是硬件流表卸载的必要条件，不能省。
+	#
+	# fw4 会同时渲染 inet 和 bridge 两个 flowtable，bridge 那个的链上是
+	#
+	#     meta l4proto { tcp, udp } flow offload @fb;
+	#
+	# 而 nft_flow_offload_init() 末行是
+	#
+	#     return nf_ct_netns_get(ctx->net, ctx->family);
+	#
+	# 走 NFPROTO_BRIDGE 分支时进入 nf_ct_netns_do_get()：
+	#
+	#     case NFPROTO_BRIDGE:
+	#             if (!nf_ct_bridge_info) {
+	#                     if (!retry) { err = -EPROTO; goto out_unlock; }
+	#                     request_module("nf_conntrack_bridge");
+	#                     ...
+	#
+	# nf_ct_bridge_info 由 nf_conntrack_bridge.ko 注册，而这个 .ko 只在
+	# CONFIG_NF_CONNTRACK_BRIDGE 下编译。缺它时 request_module 必然失败，
+	# 规则加载返回 -EPROTO，nft 打印成
+	#
+	#     Error: Could not process rule: Protocol error
+	#             meta l4proto { tcp, udp } flow offload @fb;
+	#     The rendered ruleset contains errors, not doing firewall restart.
+	#
+	# 于是 fw4 拒绝整个规则集 —— 后果不是"offload 没了"，而是任何防火墙
+	# 改动都无法生效，且失败是静默的。
+	#
+	# 实测（2026-11-11，本板）：加这个包之前 fw4 check 必失败；加上之后
+	# fw4 check 通过，两个 flowtable（bridge fb / inet ft）都带 flags offload
+	# 建起来，规则 flow add @fb / flow add @ft 正常下发。
 	DEVICE_PACKAGES := kmod-phy-motorcomm \
 		kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
-		airoha-ponctl airoha-pond fitblk luci-app-pon
+		airoha-ponctl airoha-pond fitblk luci-app-pon \
+		kmod-nf-conntrack-bridge
 endef
 TARGET_DEVICES += fiberhome_hg5580a-ubi
