@@ -515,9 +515,63 @@
 
 /*
  * AN7583 NPU（硬件转发加速）—— 关闭。
- * HG5380A 上机实测：status = "okay" 时内核停在
- *   airoha-npu 1e900000.npu: NOTICE:  Get secure key in flash
- * 之后看门狗复位。等 LAN/PON 都验证完再单独调。
+ *
+ * 【结论先行】这块板子上开 NPU 会让设备无法启动，只能停在 U-Boot / 反复重启。
+ *
+ * 实测记录（2026-11-11，HG5580A）：
+ * 把这一节改成 status = "okay" 编译（镜像 33865998 B, md5 0f84fd3ddde3abdfbfa82b14b93b1f5a）
+ * 并刷入后，串口能走到
+ *
+ *     FIT: Selected configuration: "config-1" (OpenWrt fiberhome_hg5580a-ubi)
+ *     VFS: Mounted root (squashfs filesystem) readonly on device 259:0.
+ *     Run /sbin/init as init process
+ *     init: - preinit -
+ *
+ * 然后停住不再前进，网络完全不通，最后表现为停在 U-Boot 或反复重启。
+ * 整段内核日志里没有出现任何 airoha-npu 的 probe 输出，也没有
+ * "NPU fw version"，说明它连 probe 都没走完。
+ *
+ * 这与本项目早先在 HG5380A 上的观察一致（同 SoC、同驱动、同固件）：
+ *
+ *     airoha-npu 1e900000.npu: NOTICE:  Get secure key in flash
+ *     → 看门狗复位
+ *
+ * 也就是说 5380A 和 5580A 都有这个问题，不是单板偶发。
+ *
+ * ---------------------------------------------------------------------------
+ * 复位后排查过的、确认【不是】原因的部分，留给下次继续：
+ *
+ * 1. "Get secure key in flash" 这句在当前驱动源码里不存在。
+ *    drivers/net/ethernet/airoha/ 与 target/linux/airoha/patches-6.18/
+ *    全树 grep 均无命中。所以那句话来自另一版驱动，不能用来判断现在的
+ *    失败点，但也不能据此认为问题已消失 —— 实测它仍然起不来。
+ *
+ * 2. 构建侧是齐的，不是"忘了打包":
+ *        CONFIG_NET_AIROHA_NPU=y                （config-6.18）
+ *        airoha_npu.o 已链接进 airoha-eth（airoha-eth-y 只含 eth+ppe，
+ *        npu 由 obj-$(CONFIG_NET_AIROHA_NPU) 单独进 built-in.a）
+ *        /lib/firmware/airoha/an7583_npu_rv32.bin   85432 B < 0x200000
+ *        /lib/firmware/airoha/an7583_npu_data.bin    3244 B < 0x10000
+ *        固件名与 an7583_npu_soc_data 里 NPU_AN7583_FIRMWARE_* 一致
+ *    DTB 也确认过是 status = "okay"（dtc -I dtb -O dts 验过）。
+ *
+ * 3. 本树已带两条针对性修复，仍未解决:
+ *        924-net-airoha-npu-use-coherent-mailbox-dma.patch
+ *            mailbox 改 coherent DMA（原来 CPU 写的消息 NPU 可能看不到）
+ *        926-net-airoha-npu-bound-mailbox-wait.patch
+ *            给 mailbox 等待加时限，避免无限阻塞
+ *
+ * 4. 同 SoC 其他板子（an7583-evb、an7583-evb-emmc、nokia_xg-040g、
+ *    an7581-hg5382a）都写 status = "okay"，但它们都没在这块板子上验证过，
+ *    不能当作本板也能开.
+ *
+ * 下次若要继续调，必须走【不落 flash】的路径（initramfs + U-Boot tftp/
+ * XMODEM 引导），确认 NPU 能起来之后再进 sysupgrade，否则每次失败都要
+ * 从 U-Boot 恢复。
+ * ---------------------------------------------------------------------------
+ *
+ * 影响面：npu 关闭时 airoha_ppe_init() 走软件路径，基本转发和 NAT 不受
+ * 影响，只是没有硬件流表卸载（PPE flow offload）。日常路由/测速不受阻。
  */
 &npu {
 	status = "disabled";

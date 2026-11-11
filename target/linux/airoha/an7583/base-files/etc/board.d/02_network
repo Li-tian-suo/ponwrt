@@ -35,7 +35,22 @@ an7583_setup_interfaces()
 		# address, and LuCI is unreachable on 192.168.1.1 -- while the serial
 		# console looks perfectly healthy, which makes it easy to misread as a
 		# firewall or uhttpd problem.
-		ucidef_set_interfaces_lan_wan "lan2 lan3 lan4" "pon0"
+		# lan1 是 GDM3 + YT8821 的 2.5G 电口，必须一起放进 br-lan。
+		#
+		# 漏掉 lan1 的后果不是"少一个口"，而是整个管理面消失：接口不在任何
+		# bridge 里，netifd 就不会把它 set up，phylink 也就永远停在
+		# phylink_create() 之后的未启动状态 —— 网口 LED 不亮、carrier 读出来
+		# 是 "Invalid argument"（没有 phydev 接到 netdev）、dmesg 里连
+		# "configuring for ... link mode" 都不会出现。现象看起来像是 PHY
+		# 或 SerDes 没驱动起来，实际只是没人 ifup 过它。
+		#
+		# 手工验证过（2026-11-11，lan1 插 2.5G 电口）：
+		#     uci add_list network.@device[0].ports=lan1; uci commit; ifup lan
+		# 立刻得到
+		#     lan1: configuring for phy/2500base-x link mode
+		#     lan1: Link is Up - 2.5Gbps/Full - flow control rx/tx
+		#     br-lan: port 1(lan1) entered forwarding state
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "pon0"
 		;;
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"

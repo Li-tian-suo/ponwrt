@@ -15,6 +15,31 @@ case "$board" in
 nokia,xg-040g-mf)
 	ubootenv_add_mtd "u-boot-env" "0x1c000" "0x4000" "0x4000"
 	;;
+#
+# HG5380A / HG5580A (UBI) 的 U-Boot 环境存在 UBI 卷里，不是裸 mtd 分区。
+#
+# 少这一个分支的后果不是"fw_printenv 少几个变量"，而是 /etc/fw_env.config
+# 根本不会被生成，于是 fw_printenv / fw_setenv 直接失败：
+#
+#     root@ponwrt:~# fw_printenv
+#     Cannot open /etc/fw_env.config: No such file or directory
+#
+# 而 sysupgrade 的 stage2 会把 /etc/fw_env.config 拷进 ramfs：
+#
+#     package/base-files/files/lib/upgrade/stage2:59:
+#             /etc/fw_env.config $RAMFS_COPY_DATA
+#
+# 也就是说任何需要读写 U-Boot 环境的上层逻辑（保存/恢复 bootargs、
+# 升级后改 bootcmd、诊断时看 preboot）在这块板上全部静默缺席。
+#
+# ubootenv_add_ubi_default 用的几何参数（0x0 / 0x1f000 / 0x1f000，扇区数 1）
+# 对应本板 UBI 卷的实际情况：
+#     ubi0_1  ubootenv   126976 B  (= 0x1f000)
+#     ubi0_2  ubootenv2  126976 B
+# 两个卷互为冗余，正好是 U-Boot CONFIG_ENV_IS_IN_UBI 的双副本布局。
+#
+fiberhome,hg5380a-ubi|\
+fiberhome,hg5580a-ubi|\
 nokia,xg-040g-mf-ubi)
 	ubootenv_add_ubi_default
 	;;
