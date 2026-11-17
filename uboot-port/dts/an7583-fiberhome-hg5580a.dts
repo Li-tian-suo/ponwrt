@@ -1,0 +1,241 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * FiberHome HG5580A - Airoha AN7583 ONU
+ *
+ * Hardware confirmed on real hardware (U-Boot banner + /api/device):
+ *   SoC        Airoha AN7583 (2x Cortex-A53)
+ *   DRAM       512 MiB @ 0x80000000
+ *   NAND       SkyHigh S35ML02G300 (ML02G300WH100), 256 MiB
+ *              block 128 KiB, page 2048, OOB 128
+ *   Serial     UART1 at 0x1fbf0000, 115200 8N1
+ *   PHY        Motorcomm YT8821 2.5G on gdm3 (OUI 0x13D47A, MDIO 0x07)
+ *   Switch     MediaTek MT7530 on gdm1
+ *   Optical    Airoha UX3363 paged BOSA, I2C 0x51
+ *
+ * Partition layout
+ * ----------------
+ * One UBI container plus the vendor data blobs.  This deliberately abandons the
+ * stock 14-partition table.
+ *
+ *   0x00000000  0x00020000  bl2       128 KiB, writable
+ *   0x00020000  0x0e6e0000  ubi       242 MiB, the only managed region
+ *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
+ *   0x0ec00000  0x00020000  bosacal   BOSA calibration, read-only
+ *   0x0ec20000  0x00020000  identity  vendor identity mirror, read-only
+ *
+ * Two constraints fix the sizes, and neither is negotiable
+ * -------------------------------------------------------
+ *   plat/ecnt/en7523/bl2_boot_nand_ubi.c
+ *       #define UBI_START_ADDR 0x20000
+ *     BL2 reads its UBI container from a fixed offset, so "ubi" must begin
+ *     immediately after a 128 KiB bl2.
+ *
+ *   net/lwip/httpd.c, run_bootloader_update(true)
+ *       if (mtd->size != mtd->erasesize) goto out;
+ *     The flash-bl2 handler refuses any partition that is not exactly one
+ *     eraseblock, so bl2 cannot be 2.5 MiB.
+ *
+ * Why bl2 must NOT be marked read-only
+ * ------------------------------------
+ * mtdpart.c turns the flag into a cleared MTD_WRITEABLE bit:
+ *
+ *   if (ofnode_read_bool(child, "read-only"))
+ *           part.mask_flags |= MTD_WRITEABLE;   // removed on allocation
+ *
+ * and every write path then bails out:
+ *
+ *   mtdcore.c: if (!(mtd->flags & MTD_WRITEABLE)) return -EPERM;
+ *
+ * so a read-only bl2 makes flash-bl2 fail at the erase phase.  factory, bosacal
+ * and identity stay read-only on purpose: nothing should ever write them, and a
+ * ubi-rebuild cannot reach them because they sit outside the UBI window.
+ *
+ * Why not keep carving UBI out of the stock "apps" window
+ * ------------------------------------------------------
+ * The previous layout put ubi at 0x5f00000 + 0x6800000, which fully covers the
+ * stock "apps" (32 MiB), "overlay" (24 MiB) and "apps_data" (48 MiB).  Booting
+ * the vendor firmware therefore wrote its overlay and app data into our UBI and
+ * corrupted it:
+ *
+ *   ubi0 error: scan_peb: bad image sequence number -730722252 in PEB 1
+ *   ubi0 error: ubi_attach_mtd_dev: failed to attach mtd7, error -22
+ *
+ * With one contiguous window that ends exactly at "factory", no stock partition
+ * overlaps UBI, so neither the vendor firmware nor a ubi-rebuild can clobber it.
+ *
+ * UBI volumes: fip, fit, ubootenv, ubootenv2, bosa, ri.
+ */
+/dts-v1/;
+
+#include <dt-bindings/leds/common.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include "an7583.dtsi"
+
+/ {
+	model = "FiberHome HG5580A";
+	compatible = "fiberhome,hg5580a-ubi", "airoha,an7583";
+
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon";
+		stdout-path = "serial0:115200n8";
+		/*
+		 * The first 2 MiB at 0x80000000 are reserved for the secure
+		 * firmware (atf@ node in an7583.dtsi); hand the rest to Linux.
+		 */
+		linux,usable-memory-range = <0x0 0x80200000 0x0 0x1fe00000>;
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x20000000>;
+	};
+
+	keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&an7583_pinctrl 35 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+
+	leds {
+		compatible = "gpio-leds";
+
+		/*
+		 * Not indicators: these two hold the YT8821 2.5G PHY out of
+		 * reset / powered.  Names come from the vendor device tree
+		 * (it still says "an8811") and the inverted polarity is
+		 * deliberate -- see the long comment in the Linux DTS.
+		 */
+		phy_reset {
+			label = "an8811_reset";
+			gpios = <&an7583_pinctrl 28 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		phy_tx_power_disable {
+			label = "phy_tx_power_disable";
+			gpios = <&an7583_pinctrl 15 GPIO_ACTIVE_HIGH>;
+			default-state = "on";
+		};
+
+		/* Front-panel LEDs.  green:power is the activity LED. */
+		led_status {
+			label = "green:power";
+			gpios = <&an7583_pinctrl 6 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_pon {
+			label = "green:pon";
+			gpios = <&an7583_pinctrl 7 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+
+		led_los {
+			label = "green:los";
+			gpios = <&an7583_pinctrl 8 GPIO_ACTIVE_LOW>;
+			default-state = "off";
+		};
+	};
+};
+
+/*
+ * SPI-NAND.  One UBI container that stops at the factory partition, so nothing
+ * U-Boot or ubi-rebuild touches can overlap the read-only vendor data.
+ */
+&snfi {
+	status = "okay";
+};
+
+&spi_nand {
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/*
+		 * Vendor BL2.  Exactly one 128 KiB eraseblock, because both the
+		 * TF-A UBI loader and U-Boot's flash-bl2 handler require it:
+		 *
+		 *   plat/ecnt/en7523/bl2_boot_nand_ubi.c: UBI_START_ADDR 0x20000
+		 *   httpd.c run_bootloader_update(true):
+		 *       mtd->size != mtd->erasesize -> reject
+		 *       preloader FIP goes at offset 0x800 inside the block
+		 */
+		partition@0 {
+			/*
+			 * No "read-only" here, deliberately.  mtdpart clears
+			 * MTD_WRITEABLE when the property is present:
+			 *
+			 *   if (ofnode_read_bool(child, "read-only"))
+			 *           part.mask_flags |= MTD_WRITEABLE;
+			 *
+			 * and mtdcore then refuses the erase:
+			 *
+			 *   if (!(mtd->flags & MTD_WRITEABLE)) return -EPERM;
+			 *
+			 * flash-bl2 erases this partition before writing it, so
+			 * the flag would make the update fail at phase "erase".
+			 */
+			label = "bl2";
+			reg = <0x0 0x20000>;
+		};
+
+		/*
+		 * The only partition U-Boot formats and manages.
+		 *
+		 * Starts at 0x20000 to match BL2's UBI_START_ADDR, and ends exactly
+		 * at the factory offset: 0x20000 + 0xe6e0000 = 0xe700000.
+		 */
+		partition@20000 {
+			label = "ubi";
+			reg = <0x20000 0xe6e0000>;
+		};
+
+		/* MAC / PON serial / optical calibration.  Never written. */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+		};
+
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x20000>;
+			read-only;
+		};
+
+		partition@ec20000 {
+			label = "identity";
+			reg = <0xec20000 0x20000>;
+			read-only;
+		};
+	};
+};
+
+/* UX3363 paged BOSA and the factory EEPROM sit on i2c0. */
+&i2c0 {
+	status = "okay";
+};
+
+&i2c1 {
+	status = "okay";
+};
+
+/*
+ * gdm1 is the MT7530 switch CPU port (lan2..lan4); gdm3 is the YT8821 2.5G
+ * port on lan1.  Both are needed by the U-Boot network stack, which the Web
+ * recovery and TFTP paths use.
+ */
+&gdm1 {
+	status = "okay";
+};
+
+&gdm3 {
+	status = "okay";
+};

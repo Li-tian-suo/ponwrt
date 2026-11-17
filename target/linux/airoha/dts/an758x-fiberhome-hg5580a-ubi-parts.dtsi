@@ -1,0 +1,314 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * FiberHome HG5580A -- single-UBI partition layout.
+ *
+ * Why this replaces the previous 10-partition table
+ * -------------------------------------------------
+ * The earlier layout carved "ubi" out of the stock "apps" window
+ * (0x5f00000 + 0x6800000).  That window fully covers the stock partitions
+ * "apps" (32 MiB), "overlay" (24 MiB) and "apps_data" (48 MiB), so booting the
+ * vendor firmware wrote its overlay and application data straight into our UBI
+ * container.  The result on hardware was:
+ *
+ *   ubi0 error: scan_peb: bad image sequence number -730722252 in PEB 1,
+ *               expected 653200639
+ *   ubi0 error: ubi_attach_mtd_dev: failed to attach mtd7, error -22
+ *
+ * and, because the kernel then could not read the "bosa" and "ri" volumes, the
+ * BOSA driver had no calibration to bind to, so pon0 never appeared at all.
+ *
+ * The fix is to stop sharing the flash with the vendor layout.  UBI now owns one
+ * contiguous window that no stock partition overlaps.
+ *
+ * Layout
+ * ------
+ *   0x00000000  0x00020000  bl2       128 KiB, writable
+ *   0x00020000  0x0e6e0000  ubi       242 MiB, the only managed region
+ *   0x0e700000  0x00500000  factory   vendor identity blob, read-only
+ *   0x0ec00000  0x00040000  bosacal   BOSA calibration, nvmem calibration@0
+ *   0x0ec40000  0x00040000  identity  vendor identity mirror, nvmem cells
+ *
+ * "ubi" ends exactly where "factory" begins.  Nothing U-Boot or ubi-rebuild can
+ * touch overlaps the two data partitions below the UBI window, so a UBI rebuild
+ * can never destroy the MAC address, the PON serial or the optical calibration.
+ *
+ * bl2 differs between the two device trees, on purpose
+ * ----------------------------------------------------
+ * U-Boot marks bl2 writable because flash-bl2 erases and rewrites it, and
+ * mtdpart turns "read-only" into a cleared MTD_WRITEABLE bit after which mtdcore
+ * returns -EPERM from every erase and write.
+ *
+ * Linux marks it read-only because the kernel never writes bl2 -- bootloader
+ * updates go through U-Boot's web API -- so the flag is a safety net against a
+ * stray write, not a functional requirement.
+ *
+ * Sizes and offsets must match everywhere.  Writability legitimately does not:
+ * each tree describes what its own consumer needs.  The kernel DTB and
+ * uboot-port/dts/an7583-fiberhome-hg5580a.dts therefore agree on geometry and
+ * disagree on this one flag.
+ *
+ * This file must stay in sync with uboot-port/dts/an7583-fiberhome-hg5580a.dts.
+ * If the label or size of the UBI partition differs, U-Boot looks for a
+ * partition the kernel does not describe (or the reverse), which shows up as
+ * "Cannot find mtd partition \"ubi\"" at boot.
+ */
+
+&snfi {
+	status = "okay";
+};
+
+&spi_nand {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		/* Whole flash, so a complete dump is possible from Linux too. */
+		partition@0_all {
+			label = "all_flash";
+			reg = <0x0 0x10000000>;
+			read-only;
+		};
+
+		/*
+		 * Vendor BL2.  Exactly one 128 KiB eraseblock.
+		 *
+		 * Two independent constraints force this size:
+		 *
+		 *   1. The BL2 UBI boot path in this TF-A port is hardcoded to look
+		 *      for the UBI container at 0x20000:
+		 *          plat/ecnt/en7523/bl2_boot_nand_ubi.c
+		 *          #define UBI_START_ADDR 0x20000
+		 *      so "ubi" must begin immediately after a 128 KiB bl2.
+		 *
+		 *   2. U-Boot's httpd flash-bl2 handler rejects any bl2 partition
+		 *      whose size is not exactly one eraseblock:
+		 *          if (!mtd_is_partition(mtd) || mtd->offset ||
+		 *              mtd->parent->parent || !mtd_uses_pages(mtd) ||
+		 *              mtd->size != mtd->erasesize || mtd->erasesize <= 0x800)
+		 *                  goto out;
+		 *      and it writes the preloader FIP at offset 0x800 inside it.
+		 *
+		 * The earlier 2.5 MiB size satisfied neither.
+		 */
+		/*
+		 * Read-only here: the kernel never writes bl2, and the flag stops a
+		 * stray write from bricking the unit.  U-Boot's copy of this table
+		 * omits the property because flash-bl2 must erase the partition;
+		 * mtdpart clears MTD_WRITEABLE when "read-only" is present, and
+		 * mtdcore then returns -EPERM from mtd_erase().
+		 *
+		 * Geometry is identical in both trees -- only writability differs,
+		 * because each describes what its own consumer needs.
+		 */
+		partition@0 {
+			label = "bl2";
+			reg = <0x0 0x20000>;
+			read-only;
+		};
+
+		/*
+		 * The single managed region.  compatible = "linux,ubi" makes the
+		 * kernel attach the UBI device and register the named volumes.
+		 *
+		 * Starts at 0x20000 because that is where BL2 expects UBI
+		 * (UBI_START_ADDR above).  It ends precisely at the factory
+		 * partition: 0x20000 + 0xe6e0000 = 0xe700000.
+		 */
+		partition@20000 {
+			label = "ubi";
+			reg = <0x20000 0xe6e0000>;
+			compatible = "linux,ubi";
+
+			volumes {
+				/*
+				 * BOSA calibration is NOT a UBI volume here.  It
+				 * lives in the dedicated "bosacal" MTD partition
+				 * declared below, matching the upstream board file
+				 * target/linux/airoha/dts/an7583-fiberhome-hg5580a.dts
+				 * (partition@ec00000 -> calibration@0).
+				 */
+
+				/*
+				 * Board identity, copied out of the vendor factory
+				 * partition at install time.  Offsets match what
+				 * the recovery image writes and what the common
+				 * file's gdm1 / gdm2 / gdm3 nodes consume:
+				 *
+				 *   0x00  6 bytes  base MAC
+				 *   0x06  6 bytes  LAN / 2.5G MAC
+				 *   0x0c  8 bytes  PON serial  (FHTT + 4 bytes)
+				 *   0x14  6 bytes  PON MAC
+				 */
+				ubi-volume-ri {
+					volname = "ri";
+
+					nvmem-layout {
+						compatible = "fixed-layout";
+
+						#address-cells = <1>;
+						#size-cells = <1>;
+
+						fh_base_mac: mac-address@0 {
+							reg = <0x0 0x6>;
+						};
+
+						fh_lan_mac: mac-address@6 {
+							reg = <0x6 0x6>;
+						};
+
+						fh_pon_serial: pon-serial@c {
+							reg = <0xc 0x8>;
+						};
+
+						fh_pon_mac: mac-address@14 {
+							reg = <0x14 0x6>;
+						};
+					};
+				};
+
+				ubi_fit: ubi-volume-fit {
+					volname = "fit";
+				};
+
+				ubi-volume-fip {
+					volname = "fip";
+				};
+
+				ubi_env: ubi-volume-ubootenv {
+					volname = "ubootenv";
+				};
+
+				ubi_env2: ubi-volume-ubootenv2 {
+					volname = "ubootenv2";
+				};
+			};
+		};
+
+		/*
+		 * MAC / PON serial / optical calibration as shipped by the
+		 * vendor.  Outside the UBI window on purpose: this is the one
+		 * thing that cannot be regenerated, and it must survive both a
+		 * bootloader reflash and a UBI rebuild.
+		 *
+		 * The vendor stores it as a UBI volume called "fhdata" holding a
+		 * UBIFS with table / factory_conf / sysinfo_conf / led_gpio_conf.
+		 * Read from the recovery image and copied into the "ri" and
+		 * "bosa" volumes UBI owns.
+		 *
+		 * 这里刻意**不**声明 compatible = "linux,ubi"
+		 * ------------------------------------------------
+		 * 声明成 UBI 会让内核在启动时自动 attach。若分区是空的（全 FF，
+		 * 例如刷完固件后 factory 被清掉的机器），UBI 会认为需要初始化，
+		 * 于是往只读分区上写 layout volume，然后无限失败：
+		 *
+		 *     ubi1: MTD device 3 is write-protected, attach in read-only mode
+		 *     ubi1: empty MTD device detected
+		 *     ubi1 error: ubi_io_sync_erase: read-only mode   (实测 80 行)
+		 *
+		 * 而 factory 里有数据时也不需要内核自动 attach：
+		 * lib/preinit/05_hg5580a_identity 的 mount_factory() 自己会
+		 * 按需 ubiattach -m <idx>，再 mount -t ubifs ubi1:fhdata。
+		 * 原来的 ubi_fhdata 标签全仓库没有任何消费者，删掉无副作用。
+		 *
+		 * 保留 read-only：这是整机唯一一份身份数据，禁止误写。
+		 */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+		};
+
+		/*
+		 * BOSA 校准表（FiberHome BDBOB 容器，2048 字节）。
+		 *
+		 * 与上游 target/linux/airoha/dts/an7583-fiberhome-hg5580a.dts
+		 * 的 partition@ec00000 保持一致：校准从这块 MTD 分区偏移 0 读。
+		 *
+		 * 大小 256 KiB，与板级数据页面显示的一致（board/04_pon_data_hg5580a
+		 * 里也写 262144，两边必须对齐，否则页面会按错的大小读写）。
+		 *
+		 * 地址说明：本板 flash 到 0x10000000 结束。factory 到 0xEC00000，
+		 * 之后是：
+		 *     0xEC00000 + 0x40000  bosacal
+		 *     0xEC40000 + 0x40000  identity
+		 *     0xEC80000 ... 剩余空闲
+		 *
+		 * 注意：本机该分区目前只有残留的 UBI 头，需要把
+		 * factory/fhdata 里的 table 文件（2048 字节，BDBOB 格式，
+		 * crc32 = f1315e00）原样写进来，否则读到的是无效数据。
+		 * 驱动 bosa_load_calibration() 只认 APONCAL 魔数，所以即便写入
+		 * BDBOB 仍会报 calibration invalid —— 上游当前也是这个状态。
+		 */
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x40000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			bosa_calibration: calibration@0 {
+				reg = <0x0 0x800>;
+			};
+		};
+
+		partition@ec40000 {
+			label = "identity";
+			reg = <0xec40000 0x40000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			/*
+			 * 与上游一致的偏移。本机该分区目前是空的，MAC/SN 仍由
+			 * ubi-volume-ri（factory/fhdata 的 factory_conf）提供，
+			 * 所以这里只声明布局，不改变现有的取值来源。
+			 */
+			identity_base_mac: mac-address@0 {
+				reg = <0x0 0x6>;
+			};
+
+			identity_lan_mac: mac-address@6 {
+				reg = <0x6 0x6>;
+			};
+
+			identity_pon_serial: pon-serial@c {
+				reg = <0xc 0x8>;
+			};
+
+			identity_pon_mac: mac-address@14 {
+				reg = <0x14 0x6>;
+			};
+		};
+	};
+};
+
+&ubi_env {
+	nvmem-layout {
+		compatible = "u-boot,env-redundant-bool-layout";
+	};
+};
+
+&ubi_env2 {
+	nvmem-layout {
+		compatible = "u-boot,env-redundant-bool-layout";
+	};
+};
+
+/*
+ * Root specification.
+ *
+ * There is no mtd rootfs and no overlay partition.  U-Boot boots the FIT from
+ * the UBI "fit" volume and fitblk releases the rootfs inside it as a block
+ * device, so rootdisk names the volume and ubi.block=0,fit tells the kernel
+ * which UBI volume to publish as a block device.
+ *
+ * root= is deliberately absent: adding it would send the kernel looking for a
+ * partition that does not exist on this layout.
+ */
+&fh_chosen {
+	rootdisk = <&ubi_fit>;
+	bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce rootwait ubi.block=0,fit ubi.fm_autoconvert=1";
+};

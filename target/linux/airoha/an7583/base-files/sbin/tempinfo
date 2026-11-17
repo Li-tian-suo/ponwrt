@@ -1,0 +1,81 @@
+#!/bin/sh
+#
+# Temperature readout for the LuCI overview page.
+#
+# rpcd's `luci` ucode plugin exposes luci.getTempInfo, and that RPC is nothing
+# but a wrapper around this script:
+#
+#     getTempInfo: {
+#             call: function() {
+#                     if (!access('/sbin/tempinfo'))
+#                             return {};
+#                     const fd = popen('/sbin/tempinfo');
+#                     ...
+#             }
+#     },
+#
+# so when the file is absent the RPC answers with an empty object and
+# view/status/include/10_system.js silently skips the Temperature row:
+#
+#     if (tempinfo.tempinfo) {
+#             fields.splice(6, 0, _('Temperature'));
+#             fields.splice(7, 0, tempinfo.tempinfo);
+#     }
+#
+# Upstream ships this inside the emortal "autocore" package, but its install
+# rule only copies it for ipq% / mediatek% / qualcommax% targets:
+#
+#     ifneq ($(filter ipq% mediatek% qualcommax%, $(TARGETID)),)
+#             $(INSTALL_BIN) ./files/tempinfo $(1)/sbin/
+#     endif
+#
+# airoha/an7583 is not in that list, so on this board the file never appears.
+# Shipping it from the target's own base-files avoids depending on a package
+# that is not selected in .config at all.  (That Makefile has been extended to
+# cover airoha% too, but the package itself is not part of this build.)
+#
+# Which sensor is "the CPU" on an7583:
+#
+#     /sys/class/thermal/thermal_zone0  cpu-thermal
+#     /sys/class/thermal/thermal_zone1  gbe-thermal
+#     /sys/class/thermal/thermal_zone2  cpu-die-thermal
+#
+# zone0 is the CPU bandgap sensor and is what the upstream script reads, so the
+# overview number stays comparable with other targets.  If the thermal driver
+# ever fails to probe, zone0 is missing and the script says so instead of
+# printing a bogus value.
+#
+# Measured on this board (2026-11-11, idle): zone0 63.1C, zone1 64.8C,
+# zone2 62.8C.
+
+THERMAL_PATH="/sys/class/thermal"
+
+cpu_temp=""
+
+# Prefer the named zone rather than the number: nothing guarantees probe order.
+for zone in "$THERMAL_PATH"/thermal_zone*; do
+	[ -r "$zone/type" ] || continue
+	[ "$(cat "$zone/type" 2>/dev/null)" = "cpu-thermal" ] || continue
+	cpu_temp="$(awk '{printf("%.1f°C", $0 / 1000)}' "$zone/temp" 2>/dev/null)"
+	[ -n "$cpu_temp" ] && break
+done
+
+# Fall back to zone0 for the usual reason: only one sensor registered.
+if [ -z "$cpu_temp" ] && [ -r "$THERMAL_PATH/thermal_zone0/temp" ]; then
+	cpu_temp="$(awk '{printf("%.1f°C", $0 / 1000)}' "$THERMAL_PATH/thermal_zone0/temp" 2>/dev/null)"
+fi
+
+# Wireless temperature, same layout upstream uses.  This board has no radio, so
+# the glob normally matches nothing and the block is a no-op.
+wifi_temp="$(awk '{printf("%.1f°C ", $0 / 1000)}' \
+	/sys/class/ieee80211/phy*/hwmon*/temp1_input 2>/dev/null | awk '$1=$1')"
+
+if [ -n "$cpu_temp" ] && [ -z "$wifi_temp" ]; then
+	echo -n "CPU: $cpu_temp"
+elif [ -z "$cpu_temp" ] && [ -n "$wifi_temp" ]; then
+	echo -n "WiFi: $wifi_temp"
+elif [ -n "$cpu_temp" ] && [ -n "$wifi_temp" ]; then
+	echo -n "CPU: $cpu_temp, WiFi: $wifi_temp"
+else
+	echo -n "No temperature info"
+fi
