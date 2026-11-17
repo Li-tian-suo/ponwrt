@@ -331,6 +331,22 @@ jobs:
           sed -i 's/^# CONFIG_PACKAGE_fitblk is not set$/CONFIG_PACKAGE_fitblk=y/' .config
           grep -q '^CONFIG_PACKAGE_fitblk=' .config || echo 'CONFIG_PACKAGE_fitblk=y' >> .config
 
+          # configs/an7583.config 带 CONFIG_PACKAGE_i2c-tools=y，但这份镜像里的
+          # busybox 已经提供了 i2cdetect/i2cget/i2cset/i2cdump/i2ctransfer 五个
+          # applet。两个包于是都声明拥有 /usr/sbin 下同样五个文件，opkg 在
+          # package/install 阶段直接报
+          #   ERROR: i2c-tools-4.4-r2: trying to overwrite usr/sbin/i2cdetect
+          #   owned by busybox-1.38.0-r4
+          # 并让整个 world 目标失败。本 workflow 保留全量包集所以会踩到；
+          # 精简档位的 hg5380a 用 grep -v 过滤掉了它，因此一直没暴露。
+          # 五个命令 busybox 都有，关掉独立的 i2c-tools 不损失功能。
+          sed -i 's/^CONFIG_PACKAGE_i2c-tools=y$/# CONFIG_PACKAGE_i2c-tools is not set/' .config
+          if grep -q '^CONFIG_PACKAGE_i2c-tools=y$' .config; then
+            echo "::error::i2c-tools still selected, it will collide with busybox"
+            exit 1
+          fi
+          echo "i2c-tools disabled (busybox applets cover the same commands)"
+
           make prepare-tmpinfo
 
           echo "--- device selection ---"
