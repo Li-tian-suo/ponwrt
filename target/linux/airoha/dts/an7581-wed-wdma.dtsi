@@ -81,3 +81,35 @@
 		status = "okay";
 	};
 };
+
+/*
+ * Mainline airoha_wed.c binding for WED instance 0.
+ *
+ * NOTE: this node MUST NOT be called "wed@1fa02000" - that name collides with
+ * the vendor "en751221,wed" node above and the two would be merged by dtc,
+ * overwriting the vendor compatible.  "wed-mainline@1fa02000" keeps them
+ * distinct; the node name is irrelevant to airoha_wed_add_hw(), which only
+ * matches on compatible.
+ *
+ * Values transcribed from the vendor an7581.dtsi wed0 node:
+ *   wed  : 0x1fa02000 + 0xb00   IRQ 67
+ *   wdma : 0x1fa06000 + 0x400   IRQ 69/70/71 (port0 / port1 / woe)
+ *
+ * status is "disabled" and no "airoha,wed" phandle exists on the ethernet
+ * node, so airoha_eth_probe() never calls airoha_wed_add_hw() and this node
+ * stays completely inert.
+ */
+&{/soc} {
+	wed_mainline: wed-mainline@1fa02000 {
+		compatible = "airoha,en7581-wed", "syscon";
+		reg = <0x0 0x1fa02000 0x0 0xb00>,
+		      <0x0 0x1fa06000 0x0 0x400>;
+		reg-names = "wed", "wdma";
+		interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>;
+		interrupt-names = "wed", "wdma-port0", "wdma-port1", "wdma-woe";
+		status = "disabled";
+	};
+};
