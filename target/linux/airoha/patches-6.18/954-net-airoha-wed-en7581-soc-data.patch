@@ -1,0 +1,48 @@
+From: PonWrt <ponwrt@local>
+Subject: [PATCH] net: airoha: add EN7581 WED SoC data (stage 3)
+
+Add en7581_wed_data with pcie_base = { 0x1fc00000, 0x1fc20000 } and match
+it on compatible "airoha,en7581-wed".
+
+pcie_base must hold the PCIe host bridge reg[0] base addresses, because
+airoha_wed_assign() compares hw->pcie_base against
+of_address_to_resource(np, 0)->start of the bridge to pick the WED
+instance.  It is only used to reach the interrupt-mask register at +0x420.
+EN7581 declares pcie@1fc00000 / pcie@1fc20000, so the values cannot be
+copied from en7523 (0x1fa91000/0x1fa92000 is the usb_pcs hsgmii window on
+EN7581 and does not cover +0x420).
+
+.set_lan_arb is deliberately absent: the SCU LAN mux is never touched, so
+the wired PPE path is unaffected.
+
+No DT node is referenced by this patch; the matching disabled node lives in
+the OpenWrt target DTS (target/linux/airoha/dts/an7581-wed-wdma.dtsi).
+
+Signed-off-by: PonWrt <ponwrt@local>
+---
+--- a/drivers/net/ethernet/airoha/airoha_wed.c
++++ b/drivers/net/ethernet/airoha/airoha_wed.c
+@@ -178,12 +178,23 @@
+ 	.pcie_base = { 0x1fa91000, 0x1fa92000 },
+ };
+ 
++/* EN7581 exposes pcie0/pcie1 at 0x1fc00000 / 0x1fc20000.  pcie_base must
++ * equal the host bridge reg[0].start so that airoha_wed_assign() can match
++ * the controller to a WED instance; it is only used to reach the PCIe
++ * interrupt-mask register at +0x420.  Deliberately no .set_lan_arb: the
++ * SCU LAN mux is left untouched so the wired PPE path is unaffected.
++ */
++static const struct airoha_wed_soc_data en7581_wed_data = {
++	.pcie_base = { 0x1fc00000, 0x1fc20000 },
++};
++
+ static const struct of_device_id airoha_wed_of_match[] = {
+ 	{ .compatible = "econet,en751221-wed", .data = &en751221_wed_data },
+ 	{ .compatible = "econet,en751627-wed", .data = &en7528_wed_data },
+ 	{ .compatible = "econet,en7528-wed", .data = &en7528_wed_data },
+ 	{ .compatible = "econet,en7580-wed", .data = &en7580_wed_data },
+ 	{ .compatible = "airoha,en7523-wed", .data = &en7523_wed_data },
++	{ .compatible = "airoha,en7581-wed", .data = &en7581_wed_data },
+ 	{ /* sentinel */ }
+ };
+ 
