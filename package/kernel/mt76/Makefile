@@ -521,6 +521,10 @@ ifdef CONFIG_PACKAGE_kmod-mt7925e
   PKG_MAKE_FLAGS += CONFIG_MT7925E=m
 endif
 
+# ponwrt: 打开 WED 支持，使 mt7915_mmio_wed_init() 参与编译并能 attach 到
+# 主线 mtk_wed（由 patch 952 提供 mtk_soc_wed_ops）。
+NOSTDINC_FLAGS += -DCONFIG_NET_MEDIATEK_SOC_WED
+
 define Build/Compile
 	+$(KERNEL_MAKE) $(PKG_JOBS) \
 		$(PKG_MAKE_FLAGS) \

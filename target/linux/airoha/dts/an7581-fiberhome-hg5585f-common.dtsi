@@ -8,6 +8,12 @@
 #include <dt-bindings/leds/common.h>
 #include "an7581.dtsi"
 #include "an7581-fiberhome-ubi-parts.dtsi"
+/*
+ * Vendor WED/WDMA description.  Included after an7581.dtsi so the
+ * "&{/soc}" / "&{/reserved-memory}" references resolve.  Every node it
+ * adds defaults to "disabled", so nothing binds at boot.
+ */
+#include "an7581-wed-wdma.dtsi"
 
 /* Board resources shared by the FiberHome HG5585F variants. */
 

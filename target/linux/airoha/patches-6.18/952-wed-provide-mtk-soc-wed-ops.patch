@@ -1,0 +1,30 @@
+From: ponwrt build fix <build@localhost>
+Subject: [PATCH] net: ethernet: mediatek: always provide mtk_soc_wed_ops
+
+The mt76 package on this target is built with -DCONFIG_NET_MEDIATEK_SOC_WED
+so that mt7915_mmio_wed_init() participates in the build and can attach to
+the out-of-tree WED provider.
+
+mtk_wed_ops.c only defines and exports the mtk_soc_wed_ops pointer; it has
+no dependency on the MediaTek Ethernet driver or on any other WED object.
+
+However it is currently gated behind CONFIG_NET_MEDIATEK_SOC_WED, which is
+unreachable on ARCH_AIROHA (Kconfig: depends on ARCH_MEDIATEK ||
+COMPILE_TEST). modpost therefore reports
+
+  ERROR: modpost: "mtk_soc_wed_ops" [mt7915/mt7915e.ko] undefined!
+
+Build the object unconditionally. A previously succeeding build only worked
+because a stale Module.symvers still carried the symbol.
+
+Signed-off-by: ponwrt build fix <build@localhost>
+---
+--- a/drivers/net/ethernet/mediatek/Makefile
++++ b/drivers/net/ethernet/mediatek/Makefile
+@@ -9,5 +9,5 @@
+ ifdef CONFIG_DEBUG_FS
+ mtk_eth-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_debugfs.o
+ endif
+-obj-$(CONFIG_NET_MEDIATEK_SOC_WED) += mtk_wed_ops.o
++obj-y += mtk_wed_ops.o
+ obj-$(CONFIG_NET_MEDIATEK_STAR_EMAC) += mtk_star_emac.o

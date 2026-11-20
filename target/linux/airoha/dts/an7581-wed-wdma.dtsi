@@ -1,0 +1,83 @@
+// SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause)
+/*
+ * Vendor WED / WDMA description for AN7581 (FiberHome HG5585F).
+ *
+ * The vendor offload module registers the "en751221,wed" / "en751221,wed2"
+ * / "en751221,wdma" platform drivers itself, so these nodes exist purely to
+ * give it a resource to bind to.  The mainline kernel has no driver for these
+ * compatibles and will leave them unbound.
+ *
+ * Values are transcribed from the factory DTB (wed@1fa02000: two 0xb00
+ * windows, IRQ 67/68; wdma@1fa06000: two 0x400 windows, IRQ 69..74).
+ *
+ * All nodes default to "disabled": nothing binds at boot, so a wrong guess
+ * here cannot break the WiFi data path.  Flip to "okay" only when actually
+ * testing the vendor module.
+ */
+
+&{/reserved-memory} {
+	npu_pkt: npu-pkt@81000000 {
+		no-map;
+		/*
+		 * 22 MiB = 0x1600000.  Verified against the QWRT factory DTB
+		 * (qwrt-live/wed-values.txt:80):
+		 *   reg = 00 00 00 00 | 81 00 00 00 | 00 00 00 00 | 01 60 00 00
+		 *   -> addr 0x81000000, size 0x01600000 (22 MiB)
+		 * An earlier transcription in this file said 0x160000 (1.375 MiB),
+		 * which is 10x too small: the NPU would write packets outside the
+		 * reserved window.  Fixed 2026-11-18.
+		 */
+		reg = <0x0 0x81000000 0x0 0x1600000>;
+	};
+
+	npu_ba: npu-ba@90c06800 {
+		no-map;
+		reg = <0x0 0x90c06800 0x0 0x200000>;
+	};
+};
+
+&{/soc} {
+	wdma: wdma@1fa06000 {
+		compatible = "en751221,wdma";
+		reg = <0x0 0x1fa06000 0x0 0x400>,
+		      <0x0 0x1fa06400 0x0 0x400>;
+		interrupts = <GIC_SPI 69 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 70 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 71 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 72 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 73 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>;
+		status = "disabled";
+	};
+
+	/*
+	 * 一个节点、两个窗口、两条中断，与厂商 DTB 完全一致：
+	 *   instance n -> reg[n] = 0x1fa02000 + n*0x1000, size 0xb00
+	 *              -> irq[n] = GIC_SPI (67 + n)
+	 *
+	 * 为什么现在置为 okay：主线 mtk_wed 要的 hw->irq 只能来自
+	 * platform_get_irq()/irq_of_parse_and_map()。实测在模块里手工
+	 * irq_create_mapping() 拿到的描述符 chip 是 no_irq_chip，
+	 * request_irq() 必然返回 -ENOSYS。厂商 mt_whnat_7916.ko 也确实是
+	 * 用 irq_of_parse_and_map / platform_get_irq 从 DT 取中断的
+	 * （符号表里这两条都是 U）。所以节点必须存在于 DT 里。
+	 *
+	 * 没有驱动匹配 "en751221,wed"，这里只会多出一个未绑定的
+	 * platform device，对现有数据面没有任何影响。
+	 */
+	wed: wed@1fa02000 {
+		compatible = "en751221,wed";
+		reg = <0x0 0x1fa02000 0x0 0xb00>,
+		      <0x0 0x1fa03000 0x0 0xb00>;
+		interrupts = <GIC_SPI 67 IRQ_TYPE_LEVEL_HIGH>,
+			     <GIC_SPI 68 IRQ_TYPE_LEVEL_HIGH>;
+		/*
+		 * wed_num / pci_slot_map 被厂商模块用来枚举 WED 实例。
+		 * 厂商 DTB 里 pci_slot_map 是单 cell <1>（WiFi 在 PCIe slot 1），
+		 * wed_num 为 2 个实例。
+		 */
+		wed_num = <2>;
+		pci_slot_map = <1>;
+		status = "okay";
+	};
+};
