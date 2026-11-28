@@ -20,6 +20,12 @@ an7583_setup_interfaces()
 		# Opening wan starts the pon0 PMA, PLOAM, and OMCI lifecycle.
 		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "pon0"
 		;;
+	fiberhome,hg5380a|\
+	fiberhome,hg5580a)
+		# Four copper ports into br-lan, WAN bound straight to pon0: opening
+		# wan starts the pon0 PMA, PLOAM and OMCI lifecycle.
+		ucidef_set_interfaces_lan_wan "lan1 lan2 lan3 lan4" "pon0"
+		;;
 	*)
 		echo "Unsupported hardware. Network interfaces not initialized"
 		;;

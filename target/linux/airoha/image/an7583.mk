@@ -80,3 +80,55 @@ define Device/nokia_xg-040g-mf-ubi
   ARTIFACTS := bl31-uboot.fip preloader.bin
 endef
 TARGET_DEVICES += nokia_xg-040g-mf-ubi
+
+# ---------------------------------------------------------------------------
+# FiberHome HG5580A / HG5380A (Airoha AN7583, vendor partition table)
+#
+# The image is a raw container, not a UBI image and not a tar:
+#   FIT (kernel + dtb) padded to the squashfs offset, then squashfs, then the
+#   OpenWrt metadata trailer.
+# platform.sh writes it into the vendor's inactive A/B slots (KernelB/RootfsB),
+# which is why the payload is a .bin and these do not use KERNEL_IN_UBI.
+#
+# The vendor bootloader's LZMA decoder cannot inflate the lp=2 stream that
+# OpenWrt's lzma produces ("Uncompress error 7"), so the kernel is gzip
+# compressed here: both the vendor loader and U-Boot understand gzip.
+# ---------------------------------------------------------------------------
+define Device/fiberhome_hg5580a
+  $(call Device/FitImageLzma)
+  KERNEL = kernel-bin | gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
+  DEVICE_VENDOR := FiberHome
+  DEVICE_MODEL := HG5580A
+  DEVICE_DTS := an7583-fiberhome-hg5580a
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  KERNEL_SIZE := 6144k
+  # The optical front end is an Airoha UX3363 (paged BOSA) and the 2.5G copper
+  # port is a Motorcomm YT8821.  en7572 stays selected so a re-fitted front end
+  # still binds; the two drivers match on their own compatible strings.
+  DEVICE_PACKAGES := kmod-phy-motorcomm \
+	kmod-airoha-paged-bosa kmod-airoha-en7572 kmod-airoha-xpon \
+	airoha-ponctl airoha-pond
+  IMAGES := sysupgrade.bin
+  IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
+	pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += fiberhome_hg5580a
+
+define Device/fiberhome_hg5380a
+  $(call Device/FitImageLzma)
+  KERNEL = kernel-bin | gzip | fit gzip $$(KDIR)/image-$$(DEVICE_DTS).dtb
+  DEVICE_VENDOR := FiberHome
+  DEVICE_MODEL := HG5380A
+  DEVICE_DTS := an7583-fiberhome-hg5380a
+  BLOCKSIZE := 128k
+  PAGESIZE := 2048
+  KERNEL_SIZE := 6144k
+  # Same board as the HG5580A; the copper PHY is an Airoha EN8811H here.
+  DEVICE_PACKAGES := kmod-phy-airoha-en8811h \
+	kmod-airoha-en7572 kmod-airoha-xpon airoha-ponctl airoha-pond
+  IMAGES := sysupgrade.bin
+  IMAGE/sysupgrade.bin := append-kernel | pad-to 128k | append-rootfs | \
+	pad-rootfs | append-metadata
+endef
+TARGET_DEVICES += fiberhome_hg5380a

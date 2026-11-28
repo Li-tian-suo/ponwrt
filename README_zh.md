@@ -29,6 +29,8 @@ PonWrt 是一个用于研究和开发的开源光猫固件项目。
 | AN7581 | ZNXT ZN504XG-D | `znxt_zn504xg-d` | `reservearea` |
 | AN7581 | ZNXT ZN515XG-D | `znxt_zn515xg-d` | `reservearea` |
 | AN7583 | Nokia XG-040G-MF | `nokia_xg-040g-mf`、`nokia_xg-040g-mf-ubi` | `bosa`、`ri` |
+| AN7583 | FiberHome HG5380A | `fiberhome_hg5380a` | `factory`、`identity` |
+| AN7583 | FiberHome HG5580A | `fiberhome_hg5580a` | `factory`、`bosacal`、`identity` |
 
 ## 编译
 

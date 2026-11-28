@@ -1,0 +1,27 @@
+#!/bin/sh
+# Late re-check for the writable root.
+#
+# 80_mount_root registers do_mount_root as a preinit_main hook; the hooks run
+# AFTER every script in this directory has been sourced, and do_mount_root
+# re-mounts /dev/root on / on the stock layout.  That stacked mount does not
+# disturb the bind mounts created by 79_hg5580a_overlay (they live in the root
+# mount's subtree), but it is cheap insurance to verify once more right before
+# 82_config_generate needs to write /etc/config/network -- hook registration
+# order is 80's do_mount_root, this one, then 82's do_config_generate.
+#
+# Functions come from 79_hg5580a_overlay: /etc/preinit sources this directory
+# into one shell, so they are already defined.
+
+do_hg5580a_overlay_late() {
+	[ -w /etc ] && return 0
+	[ -w /dev/kmsg ] && printf 'hg5580a-late: /etc read-only after mount_root, repairing\n' > /dev/kmsg
+	hg5580a_ram_overlay 2>/dev/null
+	if [ -w /etc ]; then
+		[ -w /dev/kmsg ] && printf 'hg5580a-late: /etc writable now\n' > /dev/kmsg
+	else
+		[ -w /dev/kmsg ] && printf 'hg5580a-late: /etc still read-only\n' > /dev/kmsg
+	fi
+	return 0
+}
+
+boot_hook_add preinit_main do_hg5580a_overlay_late

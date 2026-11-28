@@ -1,0 +1,618 @@
+// SPDX-License-Identifier: GPL-2.0-only OR MIT
+/*
+ * FiberHome HG5380A — Airoha AN7583
+ *
+ * 由原厂 KernelA 内 DTB（15704 字节，0x3100 处）反编译结果整理，
+ * 结构参照 ponwrt 的 an7583-nokia_xg-040g-mf-common.dtsi 与
+ * an7581-fiberhome-hg5382a.dts。
+ *
+ * TODO(上机确认)：
+ *   1. reset 按键 GPIO（当前暂用 GPIO0，与原厂 DTS 的 gpio-keys 一致前需核实）
+ *   2. LED 的 GPIO 与颜色（原厂 DTS 无 gpio-leds 节点，灯由用户态控制）
+ *   3. 光模块 BOSA 的 I2C 地址（0x50/0x51）与 tx-disable 引脚（暂用 GPIO15）
+ *   4. factory(UBI 卷 fhdata) 里 MAC/SN/校准的 nvmem 布局，未接上前 MAC 为随机
+ *   5. 2.5G PHY EN8811H 的 MDIO 地址（暂用 0xf）与复位 GPIO（暂用 34）
+ */
+/dts-v1/;
+
+/* Firmware/ATF 占用 DRAM 前 2 MiB。 */
+/memreserve/ 0x80000000 0x200000;
+
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+#include <dt-bindings/leds/common.h>
+#include "an7583.dtsi"
+
+/ {
+	model = "FiberHome HG5380A";
+	compatible = "fiberhome,hg5380a", "airoha,an7583";
+
+	aliases {
+		serial0 = &uart1;
+	};
+
+	chosen {
+		/*
+		 * root= 指向 RootfsB(mtd5) 上的 squashfs。initramfs 镜像会
+		 * 忽略这两个参数（内核优先跑 initramfs 里的 /init），
+		 * 所以同一条 DTS 可以同时服务两种镜像。
+		 */
+		bootargs = "console=ttyS0,115200 earlycon swiotlb=noforce root=/dev/mtdblock6 rootfstype=squashfs rootwait";
+		stdout-path = "serial0:115200n8";
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x0 0x80000000 0x0 0x20000000>;	/* 512 MiB */
+	};
+
+	/*
+	 * 前面板共四个指示灯（无端口灯）：
+	 *   电源    —— 硬件常亮，不受 GPIO 控制，DTS 里不配置
+	 *   光信号  —— GPIO33，低有效，实测驱动它能点亮
+	 *   光宽带  —— 原厂 DTB 里是 pwm-leds("pon:green", PWM 通道 10)，
+	 *              本树还没有 PWM 控制器节点，暂不驱动
+	 *   网络    —— 无任何 GPIO 能点亮，推测由交换芯片 PHY 的 LED 输出驱动
+	 *
+	 * 光信号灯用内核 PON 驱动注册的 pon0-los 触发器：无光时亮、有光时灭，
+	 * 与设备原有的行为一致。
+	 */
+	leds {
+		compatible = "gpio-leds";
+
+		led_los: los {
+			label = "green:los";
+			function = LED_FUNCTION_WAN;
+			color = <LED_COLOR_ID_GREEN>;
+			gpios = <&an7583_pinctrl 33 GPIO_ACTIVE_LOW>;
+			linux,default-trigger = "pon0-los";
+		};
+	};
+
+	/*
+	 * reset 键实测在 GPIO35（低有效）。
+	 * 原厂 DTB 写的是 GPIO0，验证下来完全没反应；用探针扫过 0..38 之后，
+	 * 只有 k35 的 IRQ 计数会随按键增长；PON 引脚(15~20) 已被占用需避开。
+	 *
+	 * 内核自带的 gpio-keys 驱动已通过 config-6.18 关掉，改由 OpenWrt 的
+	 * gpio-button-hotplug 接管同名 compatible，按键才能触发 procd 动作
+	 * （短按重启、长按恢复出厂、开机进 failsafe）。
+	 */
+	gpio-keys {
+		compatible = "gpio-keys";
+
+		button-reset {
+			label = "reset";
+			linux,code = <KEY_RESTART>;
+			gpios = <&an7583_pinctrl 35 GPIO_ACTIVE_LOW>;
+			debounce-interval = <60>;
+		};
+	};
+};
+
+&an7583_pinctrl {
+	gpio-ranges = <&an7583_pinctrl 0 2 53>;
+
+	pon_pins: pon-pins {
+		mux {
+			function = "pon";
+			groups = "pon_tx_disable_gpio";
+		};
+	};
+
+	mdio0_pins: mdio0-pins {
+		mux {
+			function = "mdio";
+			groups = "mdio";
+		};
+		/*
+		 * 与 Nokia XG-040G-MF / 官方 EVB 一致，只把 mdio_0 拉高。
+		 * （原厂 DTB 这里写的是 "gpio2"，但原厂内核参数
+		 *   internet_gpio=02 说明 GPIO2 是上网指示灯，与 PHY 无关，
+		 *   故不跟随。）
+		 */
+		conf {
+			pins = "mdio_0";
+			output-high;
+		};
+	};
+
+	i2c0_pins: i2c0-pins {
+		mux {
+			function = "i2c";
+			groups = "i2c0";
+		};
+	};
+
+	i2c1_pins: i2c1-pins {
+		mux {
+			function = "i2c";
+			groups = "i2c1";
+		};
+	};
+
+	/*
+	 * LAN2~LAN4 的灯由交换机内部 PHY 直接驱动：把 gpio1/2/3/4 复用成
+	 * phy1~phy4 的 led0 功能即可，PHY 自己按 link/activity 闪烁。
+	 * 之前 DTS 里没有这组配置，内核一直在报
+	 *   mdio_bus mt7530-0: Failed to setup PHY LED pinctrl
+	 */
+	spi_pins: spi-pins {
+		mux {
+			function = "spi";
+			groups = "spi";
+		};
+	};
+};
+
+&snfi {
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&spi_pins>;
+};
+
+&spi_nand {
+	status = "okay";
+
+	partitions {
+		compatible = "fixed-partitions";
+		#address-cells = <1>;
+		#size-cells = <1>;
+
+		partition@0 {
+			label = "bootloader";
+			reg = <0x0 0x280000>;
+			read-only;
+		};
+
+		partition@280000 {
+			label = "bootflag";
+			reg = <0x280000 0x80000>;
+		};
+
+		partition@300000 {
+			label = "KernelA";
+			reg = <0x300000 0x600000>;
+		};
+
+		partition@900000 {
+			label = "RootfsA";
+			reg = <0x900000 0x2800000>;
+		};
+
+		partition@3100000 {
+			label = "KernelB";
+			reg = <0x3100000 0x600000>;
+		};
+
+		partition@3700000 {
+			label = "RootfsB";
+			reg = <0x3700000 0x2800000>;
+		};
+
+		/*
+		 * 原厂 apps 占 104 MiB，OpenWrt 完全不用。切出前 32 MiB 保留
+		 * 原厂数据（万一要回滚），其余 72 MiB 给 overlay 用：
+		 * fstools 会按名字 "rootfs_data" 找到它并格式化成 ext4，
+		 * 这样 /etc/config、密码、安装的包都能持久保存。
+		 */
+		partition@5f00000 {
+			label = "apps";
+			reg = <0x5f00000 0x2000000>;
+		};
+
+		partition@7f00000 {
+			label = "rootfs_data";
+			reg = <0x7f00000 0x4800000>;
+		};
+
+		partition@c700000 {
+			label = "frameworka";
+			reg = <0xc700000 0x1000000>;
+		};
+
+		partition@d700000 {
+			label = "frameworkb";
+			reg = <0xd700000 0x1000000>;
+		};
+
+		/*
+		 * 原厂 factory 是 UBI 单卷 "fhdata"（UBIFS），里面是 UCI 配置：
+		 * factory_conf（brmac 等）、sysinfo_conf，以及光模块校准表。
+		 * 原厂脚本就是这么用的：
+		 *     uci -q -c /fhdata get factory_conf.pon_mode.value
+		 *     mount -t ubifs -o ro,sync ubi1_0 /fhdata
+		 *
+		 * 加 compatible = "linux,ubi" 让内核开机自动 attach，出现
+		 * /dev/ubi0 和卷设备，用户态即可只读挂载查看 MAC/SN/校准。
+		 * 分区保持 read-only：这里面的数据是这台机器唯一的一份。
+		 */
+		partition@e700000 {
+			label = "factory";
+			reg = <0xe700000 0x500000>;
+			read-only;
+			compatible = "linux,ubi";
+
+			volumes {
+				ubi_fhdata: ubi-volume-fhdata {
+					volname = "fhdata";
+				};
+			};
+		};
+
+		/*
+		 * BOSA 校准表存放区。0xEC00000 紧接 factory(0xe700000+0x500000)
+		 * 之后，属于 256 MiB flash 里未分配的 20 MiB，不与任何原厂分区
+		 * 重叠。整块 128 KiB 擦除，只写前 0x800 字节。
+		 */
+		partition@ec00000 {
+			label = "bosacal";
+			reg = <0xec00000 0x20000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			bosa_calibration: calibration@0 {
+				reg = <0x0 0x800>;
+			};
+		};
+
+		/*
+		 * 出厂身份数据（从 factory 的 fhdata 卷里取出来的原值）：
+		 *
+		 *   0x00  base MAC       24:E3:A4:00:33:6C   (factory_conf.brmac)
+		 *   0x06  LAN/2.5G MAC   24:E3:A4:00:33:6D   (brmac+1，保证前三字节一致)
+		 *   0x0C  PON SN         46 48 54 54 C1 F0 BA 75  → "FHTT" (GponSN)
+		 *
+		 * 内核在 probe 阶段就能读到，所以 airoha_eth 的 FE 硬件转发
+		 * 不会再因为随机 MAC 而被关掉；xpon 也能直接拿到注册序列号。
+		 */
+		partition@ec20000 {
+			label = "identity";
+			reg = <0xec20000 0x20000>;
+			compatible = "nvmem-cells";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			fh_base_mac: mac-address@0 {
+				reg = <0x0 0x6>;
+			};
+
+			fh_lan_mac: mac-address@6 {
+				reg = <0x6 0x6>;
+			};
+
+			fh_pon_serial: pon-serial@c {
+				reg = <0xc 0x8>;
+			};
+
+			/* factory_conf.ponmac，与原厂一致与 brmac 同值 */
+			fh_pon_mac: mac-address@14 {
+				reg = <0x14 0x6>;
+			};
+		};
+	};
+};
+
+&i2c0 {
+	/*
+	 * an7583.dtsi 里 i2c0 默认 disabled，必须显式打开，否则 BOSA
+	 * 不会注册成 i2c client，xpon 会一直等 optical frontend provider。
+	 */
+	status = "okay";
+	pinctrl-names = "default";
+	pinctrl-0 = <&i2c0_pins>;
+
+	/*
+	 * 光模块到底是哪颗，现在有明确证据了 —— 原厂 userfs 的
+	 * /fhrom/fhshell/fhdrv_bosa_driver_init.sh 是这样判断的：
+	 *
+	 *   bosa_driver=`i2c_debug getchipid`
+	 *   0x28 -> table.gn28l95   0x98 -> table.gn28l98
+	 *   0x2e -> table.ux3361    0x96 -> table.gn25l96
+	 *   0x20 -> table.ux3320    0x02 -> table.ux3322
+	 *
+	 *   i2c_debug write 0x51 0x7f 0x01 0x80     # 选页
+	 *   i2c_debug read  0x51 0xA4 0x01
+	 *
+	 * 也就是说：地址 0x51、分页寄存器 0x7f、型号靠读 chip id 区分，
+	 * 全部是 GN/UX 系列，压根没有 EN7572。上一版挂 airoha,en7572 在
+	 * 0x50 上探测 0x51 读回 0x0000（chip ID 不匹配），是选错了驱动。
+	 *
+	 * 本轮先 status = "disabled"：让 0x50/0x51 完全空出来，用 i2cdetect
+	 * 确认这颗 BOSA 到底挂在 i2c0 还是 i2c1 上、真正应答的地址是哪个，
+	 * 再决定挂 airoha-paged-bosa（支持 GN28L95 / UX3363）还是需要新增
+	 * GN28L98 / UX3361 的变体。xpon_mac 的 phandle 保留，编译期可解析。
+	 */
+	hg5380a_bosa: optical-front-end@51 {
+		compatible = "fiberhome,hg5x-bosa", "airoha,paged-bosa";
+		reg = <0x51>;
+
+		/* 原厂：phy_tx_power_disable = GPIO15，默认拉高（关发射） */
+		fiberhome,ben-active-high;
+		tx-disable-gpios = <&an7583_pinctrl 15 GPIO_ACTIVE_HIGH>;
+
+		/*
+		 * 出厂校准表（2048 字节，FiberHome BDBOB 容器）。
+		 * 没有它 BOSA 的接收均衡器保持默认，眼图为空 —— 实测表现就是
+		 * SerDes 频率锁定（freqdet_locked=1）但 xgtc_sync 一直 hunt。
+		 * 表由 U-Boot 从 fhdata 卷取出写到 bosacal 分区，见下方
+		 * partition@ec00000。内核只读。
+		 */
+		nvmem-cells = <&bosa_calibration>;
+		nvmem-cell-names = "calibration";
+		status = "okay";
+	};
+};
+
+/*
+ * 上机实测 i2cdetect -y 0 在 0x50 / 0x51 都有应答，i2c1 全空（还刷了一屏
+ * 超时日志）。所以 BOSA 在 i2c0 上，i2c1 关掉，先不折腾。
+ */
+&i2c1 {
+	status = "disabled";
+};
+
+/*
+ * USB：an7583.dtsi 里 usb_phy / usb0 同样默认 disabled，
+ * 不启用的话 /sys/bus/usb/devices/ 是空的（连根 hub 都没有）。
+ */
+&usb_phy {
+	status = "okay";
+};
+
+&usb0 {
+	status = "okay";
+};
+
+&mdio_0 {
+	pinctrl-names = "default";
+	pinctrl-0 = <&mdio0_pins>;
+
+	/*
+	 * 2.5G PHY = Motorcomm YT8821，MDIO 地址 0x07。
+	 *
+	 * 上机实测（全总线扫描 + 32 个寄存器 dump + 写回测试）：
+	 *
+	 *   dump 07: 00=1040 01=7949 02=4f51 03=ea19 04=11e1 06=0064 07=2001
+	 *            09=0200 0f=2000 10=0062 14=082c 1f=4c8d
+	 *   wtest 07: bmcr 1040 -> 5040 loopback=STUCK      <- 写得进去，真芯片
+	 *
+	 * 0x4f51ea19 正是主线 drivers/net/phy/motorcomm.c 里的
+	 *
+	 *   #define PHY_ID_YT8821  0x4f51ea19
+	 *   { PHY_ID_MATCH_EXACT(PHY_ID_YT8821), .name = "YT8821 2.5Gbps PHY" }
+	 *
+	 * 之前当成 Airoha EN8811H（ID 0x03a2a411）来搞，方向就是错的：0x0f 上
+	 * 根本没有芯片（原厂 U-Boot 也报过 "Could not get PHY ... addr 15"），
+	 * EN8811H 灌固件那 7.5 秒超时纯属白等。
+	 *
+	 * 用 "ethernet-phy-ieee802.3-c22" 让内核自己读硬件 ID，读回
+	 * 0x4f51ea19 就会绑上 motorcomm 驱动。这颗 PHY 上电即可应答，不需要
+	 * 复位脚（GPIO34 上做过复位，0x0f 与 0x07 都没有变化，说明与它无关）。
+	 */
+	yt8821: ethernet-phy@7 {
+		compatible = "ethernet-phy-ieee802.3-c22";
+		reg = <0x7>;
+	};
+};
+
+&switch {
+	status = "okay";
+	/*
+	 * 这里不要写 pinctrl-0 = <&mdio0_pins>：mdio0_pins 已归 mdio_0 所有，
+	 * 同一个 pin group 被两个设备申请时第二个会被拒绝（-EINVAL），
+	 * switch 会探测失败，内部 GSW 端口全没了，EN8811H 也就无从探测。
+	 */
+};
+
+
+
+&gsw_port2 {
+	status = "okay";
+	label = "lan2";
+};
+
+&gsw_phy2 {
+	status = "okay";
+	interrupts = <2>;
+
+};
+
+
+&gsw_port3 {
+	status = "okay";
+	label = "lan3";
+};
+
+&gsw_phy3 {
+	status = "okay";
+	interrupts = <3>;
+
+};
+
+
+&gsw_port4 {
+	status = "okay";
+	label = "lan4";
+};
+
+&gsw_phy4 {
+	status = "okay";
+	interrupts = <4>;
+
+};
+
+
+&gdm3 {
+	status = "okay";
+	openwrt,netdev-name = "lan1";
+	phy-handle = <&yt8821>;
+	phy-mode = "2500base-x";
+
+	nvmem-cells = <&fh_lan_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * gdm1 是 GSW 交换机的 CPU 口（switch 的 port@6 用 ethernet = <&gdm1>）。
+ *
+ * 不启用它的话，DSA 在 dsa_register_switch() 里走到
+ *
+ *     conduit = dsa_port_to_conduit(dp);
+ *     if (!conduit)
+ *             return -EPROBE_DEFER;      // net/dsa/dsa.c:1259
+ *
+ * 因为 CPU 口的 conduit 网卡永远不出现，switch 会永久 deferred probe：
+ *
+ *     platform 1fb58000.switch: deferred probe pending: (reason unknown)
+ *
+ * 结果不仅 lan2~lan4 没有，连 switch 自己的 mdio 总线（内部 PHY 9~12）
+ * 也不会注册，外部 PHY 也跟着受影响。
+ */
+&gdm1 {
+	status = "okay";
+
+	/* 交换机 CPU 口用出厂 base MAC，FE 硬件转发要求它与 gdm3 前三字节一致 */
+	nvmem-cells = <&fh_base_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+&eth {
+	status = "okay";
+};
+
+/*
+ * AN7583 NPU（硬件转发加速）—— 暂时关闭。
+ *
+ * 上机实测：status = "okay" 时内核日志停在
+ *
+ *   [    1.793156] airoha-npu 1e900000.npu: NOTICE:  Get secure key in flash
+ *
+ * 之后再无任何输出，看门狗复位，系统起不来。这是 NPU 驱动在从 flash 读
+ * secure key 之后挂死，与以太网/PHY 无关。
+ *
+ * 对比历史版本也印证这一点：run17（NPU 关闭）能进用户态，run20（NPU 打开）
+ * 从未引导成功。等 LAN/PON 验证完再单独调 NPU，不要让它挡住主线。
+ */
+&npu {
+	status = "disabled";
+};
+
+&pon_pcs {
+	status = "okay";
+};
+
+/*
+ * eth_pcs 是 HSGMII/2.5G 那条 lane 的 PCS（pcs@1fa09000），gdm3 里写着
+ *
+ *     gdm3: ethernet@3 { pcs-handle = <&eth_pcs>; airoha,gdm-srcport = <0x16>; }
+ *
+ * an7583.dtsi 默认 disabled。不打开它，gdm3 拿不到 PCS，lan1 的 MAC 侧
+ * 就算 PHY 认出来了也起不来 —— 这一条之前一直漏着。
+ */
+&eth_pcs {
+	status = "okay";
+};
+
+&xpon_mac {
+	/*
+	 * PON 引脚复用必须保留：pon_tx_disable_gpio 组会把 15/16/18/19/20
+	 * 复用成 PON 功能。撤掉这组复用后，PON 的接收引脚浮空，收侧会把
+	 * 噪声误判成光信号（表现为反复 recovery、永远 optical signal present）。
+	 *
+	 * 代价：该组包含 gpio18，所以"光宽带"灯的 PWM（gpio18）暂时用不了。
+	 * 若要两者兼得，需要给 pinctrl-an7583.c 打补丁把这个组里的 18 去掉。
+	 */
+	pinctrl-names = "default";
+	pinctrl-0 = <&pon_pins>;
+	/*
+	 * 光学前端指向 0x51 的 paged BOSA（fiberhome,hg5x-bosa）。本轮该节点
+	 * status = "disabled"，只做 i2c 扫描探测；确认芯片型号后再改成 okay。
+	 */
+	optical-front-end = <&hg5380a_bosa>;
+	data-path = <&gdm2>;
+
+	/* GponSN = 46485454C1F0BA75（"FHTT" + C1F0BA75），注册用 */
+	nvmem-cells = <&fh_pon_serial>;
+	nvmem-cell-names = "pon-serial";
+	status = "okay";
+};
+
+&gdm2 {
+	airoha,pon-data-path;
+	status = "okay";
+
+	nvmem-cells = <&fh_pon_mac>;
+	nvmem-cell-names = "mac-address";
+};
+
+/*
+ * an7583.dtsi 给 CPU 挂了 operating-points-v2（含 required-opps + genpd），
+ * 6.18 的 dt_cpufreq 解析这张表时会踩野指针直接 panic：
+ *
+ *   pc : __pi_strcmp
+ *   _of_add_table_indexed -> dev_pm_opp_of_cpumask_add_table -> dt_cpufreq_probe
+ *
+ * 这颗 SoC 目前不需要动态调频，直接把 OPP 引用摘掉，让 cpufreq 干净地放弃。
+ * 同时 config-6.18 里也关了 CONFIG_CPUFREQ_DT / ARM_AIROHA_SOC_CPUFREQ。
+ */
+&cpu0 {
+	/delete-property/ operating-points-v2;
+};
+
+&cpu1 {
+	/delete-property/ operating-points-v2;
+};
+
+&cpufreq {
+	/delete-property/ operating-points-v2;
+	status = "disabled";
+};
+
+/*
+ * 光宽带指示灯：GPIO18 复用成 PWM 功能，PWM 通道 10 驱动。
+ * 参数取自本机原厂 DTB（pwmleds "pon:green", pwms = <&pwm 10 0x3d0900 1>）。
+ * 挂 pon0-registration 触发器：注册过程 O1~O3 快闪、O4 慢闪、O5 常亮。
+ */
+&an7583_pinctrl {
+	pwm_gpio18_pins: pwm-gpio18-pins {
+		mux {
+			function = "pwm";
+			pins = "gpio18";
+			output-enable;
+		};
+	};
+};
+
+/*
+ * PWM 控制器是 system-controller@1fbf0200（syscon）的子节点：
+ * 驱动用 device_node_to_regmap(dev->parent) 拿寄存器，所以**不能**写在顶层，
+ * 也**不能**带 reg（带了就会 probe 失败，表现为 error -12）。
+ */
+&{/soc/system-controller@1fbf0200} {
+	pwm: pwm {
+		compatible = "airoha,en7581-pwm";
+		#pwm-cells = <3>;
+		status = "okay";
+	};
+};
+
+/ {
+	pwmleds {
+		compatible = "pwm-leds";
+		pinctrl-names = "default";
+		pinctrl-0 = <&pwm_gpio18_pins>;
+		/* gpio18 已被 PON 引脚组占用，等 pinctrl 补丁处理好再启用 */
+		status = "disabled";
+
+		led_pon: pon {
+			label = "green:pon";
+			function = LED_FUNCTION_WAN;
+			color = <LED_COLOR_ID_GREEN>;
+			pwms = <&pwm 10 4000000 1>;
+			max-brightness = <255>;
+			linux,default-trigger = "pon0-registration";
+		};
+	};
+};

@@ -1,0 +1,126 @@
+#!/bin/sh
+# Make the root filesystem writable in preinit, so 82_config_generate can write
+# /etc/config/network and the box comes up with a LAN address on its own.
+#
+# Two flash layouts exist for this board:
+#
+#   1. single-UBI / formatted rootfs_data
+#      fstools mount_root() finds the rootfs_data volume, mounts it and pivots
+#      / onto overlayfs by itself.  Nothing else is needed; we only have to give
+#      it a writable /tmp and the PREINIT marker.
+#
+#   2. stock 13-partition layout (Device/fiberhome_hg5580a)
+#      rootfs_data is a bare 72 MiB MTD partition and the image ships neither
+#      mkfs.ubifs nor mkfs.jffs2, so volume_identify() cannot classify it and
+#      mount_root() silently returns without mounting anything.  We then build
+#      the overlay ourselves on a ram-backed upper and bind the writable
+#      subtrees over themselves.
+#
+# Why bind mounts and not "mount -t overlay ... /":
+#
+#   A mount stacked on / is invisible to processes that already have their root
+#   on the old (squashfs) mount -- path lookups start at the process root's
+#   vfsmount and only follow *child* mounts.  Measured on hardware: the overlay
+#   was demonstrably mounted on / (see /proc/mounts) yet
+#   `touch /etc/x` still returned "Read-only file system", and
+#   board_detect died with "mv: can't create '/etc/.board-base.json.tmp'".
+#   A bind mount of the overlay's subtree onto /etc IS a child mount of the
+#   root, so every process sees it.  Verified: /etc became writable,
+#   config_generate produced /etc/config/network, br-lan reached
+#   192.168.1.1/24, and the PC could ping it and fetch the LuCI page (HTTP 200).
+#
+# Ordering hazard: 80_mount_root registers do_mount_root as a preinit_main hook,
+# which runs AFTER all of these scripts are sourced and re-mounts /dev/root on /.
+# That does not disturb our bind mounts (they live in the root mount's subtree),
+# but 81_hg5580a_overlay_late re-checks afterwards and repairs if needed.
+#
+# Why this runs at source time instead of through boot_hook_add:
+#   this file sorts before 80_mount_root, and /etc/preinit sources the directory
+#   in order, so mounting here happens exactly once, early, without depending on
+#   hook registration order.
+
+HG5580A_OVL_MNT=/tmp/overlay/root
+
+hg5580a_overlay_mounted() {
+	grep -qs ' /overlay ' /proc/mounts
+}
+
+hg5580a_root_is_overlay() {
+	grep -qs ' / overlay ' /proc/mounts
+}
+
+hg5580a_etc_writable() {
+	[ -w /etc ]
+}
+
+hg5580a_ensure_dev_tmp() {
+	if ! grep -qs ' /dev ' /proc/mounts; then
+		mkdir -p /dev
+		mount -t devtmpfs -o mode=0755,nosuid devtmpfs /dev 2>/dev/null
+		[ -c /dev/console ] || mknod /dev/console c 5 1 2>/dev/null
+		[ -c /dev/null ]    || mknod /dev/null    c 1 3 2>/dev/null
+	fi
+
+	if ! grep -qs ' /tmp ' /proc/mounts; then
+		mkdir -p /tmp
+		mount -t tmpfs -o mode=1777,noatime,nosuid,nodev tmpfs /tmp 2>/dev/null
+	fi
+}
+
+hg5580a_log() {
+	[ -w /dev/kmsg ] && printf 'hg5580a-preinit: %s\n' "$*" > /dev/kmsg
+	return 0
+}
+
+# Build a ram-backed overlay and bind the subtrees that must be writable.
+hg5580a_ram_overlay() {
+	mkdir -p /tmp/overlay/upper /tmp/overlay/work "$HG5580A_OVL_MNT" 2>/dev/null
+
+	mount -t overlay overlay \
+		-o lowerdir=/,upperdir=/tmp/overlay/upper,workdir=/tmp/overlay/work \
+		"$HG5580A_OVL_MNT" 2>/dev/null || return 1
+
+	local d
+	for d in etc root overlay; do
+		[ -d "$HG5580A_OVL_MNT/$d" ] || continue
+		mkdir -p "/$d" 2>/dev/null
+		mount -o bind "$HG5580A_OVL_MNT/$d" "/$d" 2>/dev/null
+	done
+
+	hg5580a_etc_writable
+}
+
+hg5580a_preinit_overlay() {
+	hg5580a_ensure_dev_tmp
+
+	# satisfy both halves of the mount_root guard
+	[ -d /tmp ] && : > /tmp/.preinit 2>/dev/null
+	PREINIT=1
+	export PREINIT
+
+	# 1. preferred: let fstools mount the persistent overlay and pivot /
+	if ! hg5580a_overlay_mounted && ! hg5580a_root_is_overlay; then
+		PREINIT=1 /sbin/mount_root start 2>/dev/null
+	fi
+
+	if hg5580a_root_is_overlay; then
+		hg5580a_log "/ is a persistent overlay (fstools)"
+		return 0
+	fi
+	if hg5580a_overlay_mounted; then
+		hg5580a_log "/overlay mounted by fstools (root not pivoted)"
+	fi
+
+	# 2. fallback for the stock layout: ram overlay + bind mounts
+	if ! hg5580a_etc_writable; then
+		if hg5580a_ram_overlay; then
+			hg5580a_log "ram overlay active, /etc writable"
+		else
+			hg5580a_log "overlay unavailable, staying on squashfs"
+		fi
+	else
+		hg5580a_log "/etc already writable"
+	fi
+}
+
+hg5580a_preinit_overlay
